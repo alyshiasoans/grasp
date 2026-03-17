@@ -10,7 +10,7 @@ const NAV_ITEMS = [
 function Sidebar({ activePage, onNavigate, user, onLogout }) {
   return (
     <aside className="sidebar">
-      <div className="sidebar-brand">EMG Classifier</div>
+      <div className="sidebar-brand">GRASP</div>
       <nav className="sidebar-nav">
         {NAV_ITEMS.map((item) => (
           <button
