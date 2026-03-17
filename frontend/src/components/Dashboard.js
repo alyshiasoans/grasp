@@ -72,7 +72,7 @@ function Dashboard({ connected, user, onNavigate }) {
 
       {/* Per-gesture accuracy */}
       <div className="card dash-gestures-card">
-        <h3 className="dashboard-card-title">Per-Gesture Accuracy</h3>
+        <h3 className="dashboard-card-title">Per-Gesture Accuracy KATE</h3>
         {data.gestures.filter((g) => g.isUnlocked).length === 0 ? (
           <p className="dash-empty">No gestures unlocked yet. Start training to unlock gestures!</p>
         ) : (
