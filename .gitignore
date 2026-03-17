@@ -1,1 +1,14 @@
-KateGesturesRound2Jan20.mat 
+# Python
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# Data / large files
+*.mat
+*.pkl
+*.db
+
+# OS
+.DS_Store
