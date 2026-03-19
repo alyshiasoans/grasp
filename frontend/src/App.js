@@ -5,6 +5,7 @@ import TestingPage from './components/TestingPage';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
 import LoginPage from './components/LoginPage';
+import ProgressPage from './components/ProgressPage';
 
 const BACKEND_URL = 'http://localhost:5050';
 
@@ -42,7 +43,7 @@ function App() {
         {/* Header */}
         <header className="header">
           <h1 className="title">
-            {activePage === 'training' ? 'EMG Gesture Training' : activePage === 'testing' ? 'EMG Gesture Testing' : 'EMG Gesture Classifier'}
+            {activePage === 'training' ? 'EMG Gesture Training' : activePage === 'testing' ? 'EMG Gesture Testing' : activePage === 'progress' ? 'Progress' : 'EMG Gesture Classifier'}
           </h1>
           <div className="header-right">
             <div className="header-mode-toggle">
@@ -78,6 +79,10 @@ function App() {
 
         {activePage === 'testing' && (
           <TestingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
+        )}
+
+        {activePage === 'progress' && (
+          <ProgressPage user={user} />
         )}
       </div>
     </div>

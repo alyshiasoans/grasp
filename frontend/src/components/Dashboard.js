@@ -70,47 +70,6 @@ function Dashboard({ connected, user, onNavigate }) {
         </div>
       )}
 
-      {/* Per-gesture accuracy */}
-      <div className="card dash-gestures-card">
-        <h3 className="dashboard-card-title">Per-Gesture Accuracy</h3>
-        {data.gestures.filter((g) => g.isUnlocked).length === 0 ? (
-          <p className="dash-empty">No gestures unlocked yet. Start training to unlock gestures!</p>
-        ) : (
-          <div className="dash-gesture-grid">
-            {data.gestures
-              .filter((g) => g.isUnlocked)
-              .map((g) => (
-                <div key={g.gestureId} className="dash-gesture-row">
-                  <div className="dash-gesture-info">
-                    <span className="dash-gesture-name">{g.name}</span>
-                    <span className="dash-gesture-meta">
-                      {g.totalTested > 0
-                        ? `${g.correct}/${g.correct + g.incorrect} correct`
-                        : 'Not tested yet'}
-                    </span>
-                  </div>
-                  <div className="dash-gesture-bar-wrap">
-                    <div className="dash-gesture-bar">
-                      <div
-                        className="dash-gesture-bar-fill"
-                        style={{
-                          width: `${g.accuracy}%`,
-                          background:
-                            g.accuracy >= 80 ? '#34c759' : g.accuracy >= 50 ? '#ffd740' : '#ff4081',
-                        }}
-                      />
-                    </div>
-                    <span className="dash-gesture-pct">{g.accuracy}%</span>
-                  </div>
-                  {g.needsRetraining && (
-                    <span className="dash-retrain-badge">Needs Retrain</span>
-                  )}
-                </div>
-              ))}
-          </div>
-        )}
-      </div>
-
       {/* Recent sessions */}
       {data.recentSessions.length > 0 && (
         <div className="card dash-recent-card">

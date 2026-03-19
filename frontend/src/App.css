@@ -963,6 +963,107 @@ body {
   color: rgba(255,255,255,0.85);
 }
 
+/* ── Progress page ── */
+.progress-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 20px;
+  margin-top: 20px;
+}
+
+.progress-gesture-card {
+  padding: 32px 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  transition: box-shadow 0.2s;
+}
+
+.progress-gesture-card:hover {
+  box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+}
+
+.progress-gesture-img {
+  width: 120px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: 14px;
+  background: #f4f5f7;
+}
+
+.progress-gesture-name {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: #1a1a2e;
+  margin-bottom: 12px;
+}
+
+.progress-gesture-accuracy {
+  font-size: 2.2rem;
+  font-weight: 700;
+  color: #5b6abf;
+  line-height: 1.2;
+  display: none;
+}
+
+/* Circular progress ring */
+.progress-ring-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.progress-ring-svg {
+  transform: rotate(-90deg);
+}
+
+.progress-ring-text {
+  position: absolute;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+/* Expand chevron */
+.progress-chevron {
+  font-size: 0.7rem;
+  color: #bbb;
+  margin-top: 2px;
+  transition: color 0.15s;
+}
+
+.progress-gesture-card:hover .progress-chevron {
+  color: #888;
+}
+
+.progress-gesture-details {
+  display: flex;
+  gap: 16px;
+  margin-top: 4px;
+}
+
+.progress-gesture-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.progress-stat-value {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+.progress-stat-label {
+  font-size: 0.72rem;
+  color: #888;
+  font-weight: 500;
+}
+
 /* ── Testing page ── */
 .testing-page {
   display: flex;
