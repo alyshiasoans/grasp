@@ -12,6 +12,8 @@ function App() {
   const [user, setUser] = useState(null);
   const [activePage, setActivePage] = useState('dashboard');
   const [connected, setConnected] = useState(false);
+  const [mode, setMode] = useState('simulated');
+  const [liveOpts, setLiveOpts] = useState({ host: '0.0.0.0', port: '45454' });
   const socketRef = useRef(null);
 
   useEffect(() => {
@@ -39,8 +41,26 @@ function App() {
       <div className="app-main">
         {/* Header */}
         <header className="header">
-          <h1 className="title">EMG Gesture Classifier</h1>
+          <h1 className="title">
+            {activePage === 'training' ? 'EMG Gesture Training' : activePage === 'testing' ? 'EMG Gesture Testing' : 'EMG Gesture Classifier'}
+          </h1>
           <div className="header-right">
+            <div className="header-mode-toggle">
+              <div className="mode-toggle">
+                <button
+                  className={`btn btn-mode ${mode === 'simulated' ? 'active' : ''}`}
+                  onClick={() => setMode('simulated')}
+                >
+                  Simulated
+                </button>
+                <button
+                  className={`btn btn-mode ${mode === 'live' ? 'active' : ''}`}
+                  onClick={() => setMode('live')}
+                >
+                  Live EMG
+                </button>
+              </div>
+            </div>
             <span className={`status-dot ${connected ? 'connected' : 'disconnected'}`} />
             <span className="status-text">
               {connected ? 'Connected' : 'Disconnected'}
@@ -53,11 +73,11 @@ function App() {
         )}
 
         {activePage === 'training' && (
-          <TrainingPage socket={socketRef.current} connected={connected} user={user} />
+          <TrainingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
         )}
 
         {activePage === 'testing' && (
-          <TestingPage socket={socketRef.current} connected={connected} user={user} />
+          <TestingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
         )}
       </div>
     </div>

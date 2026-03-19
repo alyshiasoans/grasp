@@ -376,34 +376,37 @@ body {
 
 /* Setup card */
 .train-setup-card {
-  padding: 28px;
+  padding: 48px 40px;
+  text-align: center;
 }
 
 .train-setup-grid {
   display: flex;
   flex-direction: column;
-  gap: 20px;
-  margin-bottom: 20px;
+  gap: 24px;
+  margin-bottom: 28px;
 }
 
 .train-setup-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  align-items: center;
+  gap: 12px;
 }
 
 .train-setup-label {
-  font-size: 0.78rem;
+  font-size: 1.3rem;
   font-weight: 600;
   color: #555;
-  text-transform: uppercase;
-  letter-spacing: 1px;
+  text-transform: none;
+  letter-spacing: 0.3px;
 }
 
 .train-gesture-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  justify-content: center;
 }
 
 .train-gesture-chip {
@@ -426,8 +429,14 @@ body {
 
 .train-length-options {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
+  justify-content: center;
+}
+
+.train-length-options .btn-mode {
+  padding: 14px 32px;
+  font-size: 0.95rem;
 }
 
 .train-instructions {
@@ -443,13 +452,16 @@ body {
 
 .train-start-btn {
   width: 100%;
-  padding: 14px;
-  font-size: 0.95rem;
+  padding: 16px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  letter-spacing: 0.5px;
 }
 
 .train-stop-btn {
   width: 100%;
-  padding: 12px;
+  padding: 14px;
+  font-size: 1rem;
 }
 
 .training-grid {
@@ -527,7 +539,13 @@ body {
 .header-right {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 16px;
+}
+
+.header-mode-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .status-dot {
@@ -952,7 +970,8 @@ body {
 }
 
 .test-setup-card {
-  padding: 28px;
+  padding: 48px 40px;
+  text-align: center;
 }
 
 .test-chip-acc {

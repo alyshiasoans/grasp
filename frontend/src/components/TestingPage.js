@@ -15,12 +15,10 @@ const GESTURE_IMAGES = {
 
 const MAX_RETRIES = 3;
 
-function TestingPage({ socket, connected, user }) {
+function TestingPage({ socket, connected, user, mode, liveOpts }) {
   // Setup
   const [gestures, setGestures] = useState([]);
-  const [sessionLength, setSessionLength] = useState(15);
-  const [mode, setMode] = useState('simulated');
-  const [liveOpts, setLiveOpts] = useState({ host: '0.0.0.0', port: '45454' });
+  const [sessionLength, setSessionLength] = useState(null);
 
   // Session state
   const [sessionId, setSessionId] = useState(null);
@@ -279,45 +277,10 @@ function TestingPage({ socket, connected, user }) {
     return (
       <div className="testing-page">
         <div className="card test-setup-card">
-          <h3 className="dashboard-card-title">Test Session Setup</h3>
-
           <div className="train-setup-grid">
-            {/* Eligible gestures */}
-            <div className="train-setup-section">
-              <label className="train-setup-label">Eligible Gestures (≥15 training reps)</label>
-              <div className="train-gesture-chips">
-                {eligibleGestures.length === 0 && (
-                  <span className="train-no-gestures">
-                    No eligible gestures — train at least 15 reps per gesture first
-                  </span>
-                )}
-                {eligibleGestures.map(g => (
-                  <div key={g.gestureId} className="train-gesture-chip">
-                    <span>{g.name}</span>
-                    <span className="test-chip-acc">{g.accuracy}%</span>
-                  </div>
-                ))}
-              </div>
-              {gestures.filter(g => !g.eligible).length > 0 && (
-                <div className="test-ineligible">
-                  <span className="train-setup-label" style={{ fontSize: '0.72rem', color: '#999' }}>
-                    Not yet eligible
-                  </span>
-                  <div className="train-gesture-chips">
-                    {gestures.filter(g => !g.eligible).map(g => (
-                      <div key={g.gestureId} className="train-gesture-chip test-chip-disabled">
-                        <span>{g.name}</span>
-                        <span className="test-chip-reps">{g.totalTrained}/15 reps</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
             {/* Number of prompts */}
             <div className="train-setup-section">
-              <label className="train-setup-label">Number of Prompts</label>
+              <label className="train-setup-label">Please choose the number of prompts:</label>
               <div className="train-length-options">
                 {[10, 15, 20, 30].map(n => (
                   <button
@@ -330,53 +293,14 @@ function TestingPage({ socket, connected, user }) {
                 ))}
               </div>
             </div>
-
-            {/* Data source */}
-            <div className="train-setup-section">
-              <label className="train-setup-label">Data Source</label>
-              <div className="mode-toggle">
-                <button
-                  className={`btn btn-mode ${mode === 'simulated' ? 'active' : ''}`}
-                  onClick={() => setMode('simulated')}
-                >
-                  Simulated
-                </button>
-                <button
-                  className={`btn btn-mode ${mode === 'live' ? 'active' : ''}`}
-                  onClick={() => setMode('live')}
-                >
-                  Live EMG
-                </button>
-              </div>
-              {mode === 'live' && (
-                <div className="live-opts" style={{ marginTop: 10 }}>
-                  <label>
-                    IP
-                    <input type="text" value={liveOpts.host} onChange={e => setLiveOpts(o => ({ ...o, host: e.target.value }))} />
-                  </label>
-                  <label>
-                    Port
-                    <input type="number" value={liveOpts.port} onChange={e => setLiveOpts(o => ({ ...o, port: e.target.value }))} />
-                  </label>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="train-instructions">
-            <p>
-              You'll be prompted with gestures one at a time. Perform the gesture when shown,
-              and the classifier will try to identify it. You can <strong>retry</strong> (up to {MAX_RETRIES}x),
-              <strong> skip</strong>, or confirm the result. Weak gestures appear more often.
-            </p>
           </div>
 
           <button
             className="btn btn-start train-start-btn"
             onClick={handleStart}
-            disabled={!connected || eligibleGestures.length === 0}
+            disabled={!connected || eligibleGestures.length === 0 || !sessionLength}
           >
-            ▶ Start Testing ({sessionLength} prompts)
+            ▶ Start
           </button>
         </div>
       </div>

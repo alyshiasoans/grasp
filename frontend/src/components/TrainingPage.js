@@ -20,12 +20,10 @@ const SESSION_LENGTHS = [
   { label: '15 min', value: 15 },
 ];
 
-function TrainingPage({ socket, connected, user }) {
+function TrainingPage({ socket, connected, user, mode, liveOpts }) {
   // Setup state
   const [gestures, setGestures] = useState([]);       // available gestures from DB
-  const [sessionMinutes, setSessionMinutes] = useState(5);
-  const [mode, setMode] = useState('simulated');
-  const [liveOpts, setLiveOpts] = useState({ host: '0.0.0.0', port: '45454' });
+  const [sessionMinutes, setSessionMinutes] = useState(null);
 
   // Session state
   const [collecting, setCollecting] = useState(false);
@@ -130,27 +128,11 @@ function TrainingPage({ socket, connected, user }) {
 
       {/* ── Pre-session setup (only before collecting) ── */}
       {!collecting && !phase && (
-        <div className="card train-setup-card">
-          <h3 className="dashboard-card-title">Session Setup</h3>
-
+        <div className="card test-setup-card">
           <div className="train-setup-grid">
-            {/* Gesture info */}
-            <div className="train-setup-section">
-              <label className="train-setup-label">Available Gestures</label>
-              <div className="train-gesture-chips">
-                {gestures.length === 0 && <span className="train-no-gestures">No gestures unlocked yet</span>}
-                {gestures.map((g) => (
-                  <div key={g.gestureId} className="train-gesture-chip">
-                    <span>{g.name}</span>
-                    {g.needsRetraining && <span className="dash-retrain-badge">!</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
-
             {/* Session length */}
             <div className="train-setup-section">
-              <label className="train-setup-label">Session Length</label>
+              <label className="train-setup-label">Please choose a training length:</label>
               <div className="train-length-options">
                 {SESSION_LENGTHS.map((opt) => (
                   <button
@@ -164,49 +146,14 @@ function TrainingPage({ socket, connected, user }) {
               </div>
             </div>
 
-            {/* Mode + connection */}
-            <div className="train-setup-section">
-              <label className="train-setup-label">Data Source</label>
-              <div className="mode-toggle">
-                <button
-                  className={`btn btn-mode ${mode === 'simulated' ? 'active' : ''}`}
-                  onClick={() => setMode('simulated')}
-                >
-                  Simulated
-                </button>
-                <button
-                  className={`btn btn-mode ${mode === 'live' ? 'active' : ''}`}
-                  onClick={() => setMode('live')}
-                >
-                  Live EMG
-                </button>
-              </div>
-              {mode === 'live' && (
-                <div className="live-opts" style={{ marginTop: 10 }}>
-                  <label>
-                    IP
-                    <input type="text" value={liveOpts.host} onChange={(e) => setLiveOpts((o) => ({ ...o, host: e.target.value }))} />
-                  </label>
-                  <label>
-                    Port
-                    <input type="number" value={liveOpts.port} onChange={(e) => setLiveOpts((o) => ({ ...o, port: e.target.value }))} />
-                  </label>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Instructions */}
-          <div className="train-instructions">
-            <p>You'll be guided through each gesture one at a time. Hold the gesture for <strong>3 seconds</strong> when prompted, then relax during rest periods.</p>
           </div>
 
           <button
             className="btn btn-start train-start-btn"
             onClick={handleStart}
-            disabled={!connected || gestures.length === 0}
+            disabled={!connected || gestures.length === 0 || !sessionMinutes}
           >
-            ▶ Start Training ({sessionMinutes} min · ~{Math.max(1, Math.floor(((sessionMinutes * 60 - 6) / 6)))} gestures)
+            ▶ Start
           </button>
         </div>
       )}
