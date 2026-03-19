@@ -43,7 +43,7 @@ function App() {
         {/* Header */}
         <header className="header">
           <h1 className="title">
-            {activePage === 'training' ? 'EMG Gesture Training' : activePage === 'testing' ? 'EMG Gesture Testing' : activePage === 'progress' ? 'Progress' : 'EMG Gesture Classifier'}
+            {activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Testing' : activePage === 'progress' ? 'Progress' : 'Dashboard'}
           </h1>
           <div className="header-right">
             <div className="header-mode-toggle">
@@ -62,15 +62,11 @@ function App() {
                 </button>
               </div>
             </div>
-            <span className={`status-dot ${connected ? 'connected' : 'disconnected'}`} />
-            <span className="status-text">
-              {connected ? 'Connected' : 'Disconnected'}
-            </span>
           </div>
         </header>
 
         {activePage === 'dashboard' && (
-          <Dashboard connected={connected} user={user} onNavigate={setActivePage} />
+          <Dashboard user={user} />
         )}
 
         {activePage === 'training' && (

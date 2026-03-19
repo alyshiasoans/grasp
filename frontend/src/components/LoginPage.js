@@ -47,10 +47,10 @@ function LoginPage({ onLogin }) {
   return (
     <div className="login-page">
       <div className="login-card">
-        <h1 className="login-title">EMG Gesture Classifier</h1>
-        <p className="login-subtitle">
-          {isRegister ? 'Create an account' : 'Sign in to continue'}
-        </p>
+        <h1 className="login-title">GRASP</h1>
+        {isRegister && (
+          <p className="login-subtitle">Create an account</p>
+        )}
 
         {error && <div className="login-error">{error}</div>}
 

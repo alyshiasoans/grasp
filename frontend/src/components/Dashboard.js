@@ -1,100 +1,17 @@
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 
-const API = 'http://localhost:5050';
-
-function Dashboard({ connected, user, onNavigate }) {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    if (!user?.id) return;
-    setLoading(true);
-    fetch(`${API}/api/dashboard/${user.id}`)
-      .then((r) => r.json())
-      .then(setData)
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [user?.id]);
-
-  if (loading) {
-    return (
-      <div className="dashboard-page">
-        <h2 className="page-title">Dashboard</h2>
-        <p className="dash-loading">Loading…</p>
-      </div>
-    );
-  }
-
-  if (!data) {
-    return (
-      <div className="dashboard-page">
-        <h2 className="page-title">Dashboard</h2>
-        <p className="dash-loading">Could not load dashboard data.</p>
-      </div>
-    );
-  }
-
+function Dashboard({ user }) {
   return (
     <div className="dashboard-page">
-      <h2 className="page-title">Welcome back, {user?.firstName}!</h2>
-
-      {/* Stat cards row */}
-      <div className="dash-stats-row">
-        <div className="card dash-stat-card">
-          <div className="dash-stat-value">{data.streak}</div>
-          <div className="dash-stat-label">Day Streak 🔥</div>
-        </div>
-        <div className="card dash-stat-card">
-          <div className="dash-stat-value">{data.overallAccuracy}%</div>
-          <div className="dash-stat-label">Overall Accuracy</div>
-        </div>
-        <div className="card dash-stat-card">
-          <div className="dash-stat-value">{data.gesturesTrained}</div>
-          <div className="dash-stat-label">Gestures Trained</div>
-        </div>
-        <div className="card dash-stat-card">
-          <span className={`status-dot ${connected ? 'connected' : 'disconnected'}`} />
-          <div className="dash-stat-label">{connected ? 'Device Connected' : 'Disconnected'}</div>
-        </div>
+      <div className="card dash-welcome-card">
+        <h2 className="dash-welcome-title">Welcome, {user?.firstName}!</h2>
+        <p className="dash-welcome-subtitle">Here's how to get started with GRASP:</p>
+        <ol className="dash-instructions">
+          <li><strong>Training</strong> — Record EMG signals for each gesture to build your classifier.</li>
+          <li><strong>Testing</strong> — Test how well the classifier recognises your gestures in real time.</li>
+          <li><strong>Progress</strong> — Track your accuracy for each gesture and see where to improve.</li>
+        </ol>
       </div>
-
-      {/* Suggestions */}
-      {data.suggestions.length > 0 && (
-        <div className="card dash-suggestions-card">
-          <h3 className="dashboard-card-title">Suggestions</h3>
-          <ul className="dash-suggestion-list">
-            {data.suggestions.map((s, i) => (
-              <li key={i} className="dash-suggestion-item">{s}</li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* Recent sessions */}
-      {data.recentSessions.length > 0 && (
-        <div className="card dash-recent-card">
-          <h3 className="dashboard-card-title">Recent Sessions</h3>
-          <div className="dash-session-list">
-            {data.recentSessions.map((s) => (
-              <div key={s.id} className="dash-session-row">
-                <span className={`dash-session-type ${s.type}`}>{s.type}</span>
-                <span className="dash-session-status">{s.status}</span>
-                <span className="dash-session-date">
-                  {s.startedAt ? new Date(s.startedAt).toLocaleDateString() : '—'}
-                </span>
-                {s.duration != null && (
-                  <span className="dash-session-dur">{Math.round(s.duration)}s</span>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Practice button */}
-      <button className="btn btn-start dash-practice-btn" onClick={() => onNavigate('testing')}>
-        ▶ Start Practice Session
-      </button>
     </div>
   );
 }
