@@ -1169,6 +1169,20 @@ body {
   text-align: center;
 }
 
+.test-empty-card {
+  padding: 60px 40px;
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.test-empty-msg {
+  font-size: 1.1rem;
+  color: #666;
+  line-height: 1.7;
+}
+
 .test-chip-acc {
   font-size: 0.72rem;
   font-weight: 600;

@@ -37,7 +37,7 @@ function App() {
 
   return (
     <div className="app-layout">
-      <Sidebar activePage={activePage} onNavigate={setActivePage} user={user} onLogout={() => setUser(null)} />
+      <Sidebar activePage={activePage} onNavigate={setActivePage} user={user} onLogout={() => { setUser(null); setActivePage('dashboard'); }} />
 
       <div className="app-main">
         {/* Header */}
@@ -65,21 +65,21 @@ function App() {
           </div>
         </header>
 
-        {activePage === 'dashboard' && (
+        <div style={{ display: activePage === 'dashboard' ? 'block' : 'none' }}>
           <Dashboard user={user} />
-        )}
+        </div>
 
-        {activePage === 'training' && (
+        <div style={{ display: activePage === 'training' ? 'block' : 'none' }}>
           <TrainingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
-        )}
+        </div>
 
-        {activePage === 'testing' && (
+        <div style={{ display: activePage === 'testing' ? 'block' : 'none' }}>
           <TestingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
-        )}
+        </div>
 
-        {activePage === 'progress' && (
+        <div style={{ display: activePage === 'progress' ? 'block' : 'none' }}>
           <ProgressPage user={user} />
-        )}
+        </div>
       </div>
     </div>
   );

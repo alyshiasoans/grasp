@@ -18,6 +18,7 @@ const MAX_RETRIES = 3;
 function TestingPage({ socket, connected, user, mode, liveOpts }) {
   // Setup
   const [gestures, setGestures] = useState([]);
+  const [gesturesLoaded, setGesturesLoaded] = useState(false);
   const [sessionLength, setSessionLength] = useState(null);
 
   // Session state
@@ -47,10 +48,14 @@ function TestingPage({ socket, connected, user, mode, liveOpts }) {
   // Fetch eligible gestures
   useEffect(() => {
     if (!user?.id) return;
+    setGesturesLoaded(false);
     fetch(`${API}/api/testing/gestures/${user.id}`)
       .then(r => r.json())
-      .then(data => setGestures(data.gestures || []))
-      .catch(() => {});
+      .then(data => {
+        setGestures(data.gestures || []);
+        setGesturesLoaded(true);
+      })
+      .catch(() => setGesturesLoaded(true));
   }, [user?.id]);
 
   // Socket listeners for classification
@@ -274,6 +279,32 @@ function TestingPage({ socket, connected, user, mode, liveOpts }) {
 
   // Setup screen
   if (phase === 'setup') {
+    if (!gesturesLoaded) {
+      return (
+        <div className="testing-page">
+          <div className="card test-setup-card test-empty-card" />
+        </div>
+      );
+    }
+
+    if (eligibleGestures.length === 0) {
+      return (
+        <div className="testing-page">
+          <div className="card test-setup-card test-empty-card">
+            <div className="train-setup-grid">
+              <div className="train-setup-section">
+                <label className="train-setup-label">Not ready for testing yet!</label>
+                <p className="test-empty-msg">
+                  Each gesture needs at least 15 training reps before it can be tested.<br />
+                  Head over to the Training page to get started.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="testing-page">
         <div className="card test-setup-card">

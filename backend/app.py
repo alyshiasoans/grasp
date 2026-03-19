@@ -548,8 +548,13 @@ def register():
     db.session.commit()
 
     # create user_gesture rows for every gesture
+    default_unlocked = {"Open", "Close"}
     for g in Gesture.query.all():
-        db.session.add(UserGesture(user_id=user.id, gesture_id=g.id))
+        db.session.add(UserGesture(
+            user_id=user.id,
+            gesture_id=g.id,
+            is_unlocked=(g.gesture_name in default_unlocked),
+        ))
     db.session.commit()
 
     return jsonify({"id": user.id, "username": user.username, "firstName": user.first_name, "lastName": user.last_name}), 201
@@ -1021,6 +1026,14 @@ if __name__ == "__main__":
                 db.session.add(Gesture(gesture_name=name, gesture_image=img))
             db.session.commit()
             print("[db] seeded 8 gestures")
+
+        # Ensure all users have Open and Close unlocked
+        starter_gestures = Gesture.query.filter(Gesture.gesture_name.in_(["Open", "Close"])).all()
+        for g in starter_gestures:
+            ugs = UserGesture.query.filter_by(gesture_id=g.id, is_unlocked=False).all()
+            for ug in ugs:
+                ug.is_unlocked = True
+        db.session.commit()
 
     print("[server] starting on http://localhost:5050")
     socketio.run(app, host="0.0.0.0", port=5050, debug=False)
