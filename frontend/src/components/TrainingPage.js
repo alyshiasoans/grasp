@@ -27,6 +27,7 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
 
   // Session state
   const [collecting, setCollecting] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [phase, setPhase] = useState(null);
   const [countdown, setCountdown] = useState(0);
   const [sensorStatus, setSensorStatus] = useState(null); // { channels, quality }
@@ -54,14 +55,20 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
     const onLog = (data) => {
       setLogs((prev) => [...prev, data.text].slice(-80));
     };
-    const onDone = () => setCollecting(false);
+    const onDone = () => {
+      setCollecting(false);
+      setPaused(false);
+      setPhase(null);
+    };
     const onSensor = (data) => setSensorStatus(data);
+    const onPaused = (data) => setPaused(data.paused);
 
     socket.on('train_phase', onPhase);
     socket.on('train_countdown', onCountdown);
     socket.on('train_log', onLog);
     socket.on('train_done', onDone);
     socket.on('train_sensor', onSensor);
+    socket.on('train_paused', onPaused);
 
     return () => {
       socket.off('train_phase', onPhase);
@@ -69,6 +76,9 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
       socket.off('train_log', onLog);
       socket.off('train_done', onDone);
       socket.off('train_sensor', onSensor);
+      socket.off('train_paused', onPaused);
+      // Stop backend training if user navigates away mid-session
+      socket.emit('train_stop');
     };
   }, [socket]);
 
@@ -88,15 +98,35 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
       sessionMinutes,
     });
     setCollecting(true);
+    setPaused(false);
     setLogs([]);
     setPhase(null);
+    setCountdown(0);
     setSensorStatus(null);
   };
 
   const handleStop = () => {
     if (!socket) return;
-    socket.emit('train_stop');
-    setCollecting(false);
+    // Pause first, then show confirm popup after a tick
+    socket.emit('train_pause');
+    setPaused(true);
+    setTimeout(() => {
+      if (window.confirm('Are you sure you want to stop this session? Any unsaved progress will be lost.')) {
+        socket.emit('train_stop');
+        setCollecting(false);
+        setPaused(false);
+        setPhase(null);
+      }
+    }, 150);
+  };
+
+  const handlePause = () => {
+    if (!socket) return;
+    if (paused) {
+      socket.emit('train_resume');
+    } else {
+      socket.emit('train_pause');
+    }
   };
 
   const isGesture = phase?.phase === 'gesture';
@@ -158,63 +188,56 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
         </div>
       )}
 
-      {/* ── Active session: prompt + log grid ── */}
+      {/* ── Active session: gesture prompt ── */}
       {(collecting || phase) && (
-        <div className="training-grid">
-          {/* Left: Gesture prompt */}
-          <div className="card training-prompt-card">
-            <div className="training-progress">{progressIndex} / {progressTotal}</div>
-
-            <div
-              className="training-phase-label"
-              style={{ color: isGesture ? '#5b6abf' : '#999' }}
-            >
-              {isGesture ? 'PERFORM GESTURE' : 'REST'}
-            </div>
-
-            <div
-              className="training-gesture-name"
-              style={{ color: isGesture ? '#1a1a2e' : '#aaa' }}
-            >
-              {gestureName}
-            </div>
-
-            {imageSrc && (
-              <div className="gesture-image-wrapper gesture-animate">
-                <img src={imageSrc} alt={gestureName} className="gesture-image" />
+        <div className="card training-prompt-card">
+          {phase && (
+            <>
+              <div
+                className="training-gesture-name"
+                style={{ color: isGesture ? '#1a1a2e' : '#aaa' }}
+              >
+                {gestureName}
               </div>
-            )}
 
-            <div className="training-countdown">{countdown}</div>
+              {imageSrc && (
+                <div className="gesture-image-wrapper gesture-animate">
+                  <img src={imageSrc} alt={gestureName} className="gesture-image" />
+                </div>
+              )}
 
-            {!isGesture && phase?.nextGesture && (
-              <div className="training-next">
-                Next: <strong>{phase.nextGesture}</strong>
-              </div>
-            )}
-          </div>
+              <div className="training-countdown">{countdown}</div>
 
-          {/* Right: Log */}
-          <div className="card log-card">
-            <h3>Training Log</h3>
-            <div className="log-entries">
-              {logs.map((entry, i) => (
-                <div key={i} className="log-entry">{entry}</div>
-              ))}
-              <div ref={logBottomRef} />
-            </div>
-          </div>
+              {!isGesture && phase?.nextGesture && (
+                <div className="training-next">
+                  Next: <strong>{phase.nextGesture}</strong>
+                </div>
+              )}
+            </>
+          )}
+
+          {paused && (
+            <div className="training-paused-label">PAUSED</div>
+          )}
         </div>
       )}
 
-      {/* Stop button (during session) */}
-      {collecting && (
-        <button
-          className="btn btn-stop train-stop-btn"
-          onClick={handleStop}
-        >
-          ■ Stop Session
-        </button>
+      {/* Session controls (during session) */}
+      {(collecting || phase) && (
+        <div className="train-session-controls">
+          <button
+            className={`btn btn-pause train-pause-btn ${paused ? 'paused' : ''}`}
+            onClick={handlePause}
+          >
+            {paused ? '▶ Resume' : '⏸ Pause'}
+          </button>
+          <button
+            className="btn btn-stop train-stop-btn"
+            onClick={handleStop}
+          >
+            ■ Stop Session
+          </button>
+        </div>
       )}
     </div>
   );

@@ -9,6 +9,7 @@ node_modules/
 *.mat
 *.pkl
 *.db
+*.npz
 
 # OS
 .DS_Store

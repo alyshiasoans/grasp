@@ -68,6 +68,7 @@ active_source = None          # current EMG source (so we can stop it)
 
 training_thread = None
 training_running = False
+training_paused = False
 training_source = None
 
 
@@ -968,11 +969,33 @@ def on_train_start(data=None):
     training_thread.start()
 
 
+@socketio.on("train_pause")
+def on_train_pause(_=None):
+    global training_paused
+    training_paused = True
+    if training_source:
+        training_source.pause()
+    socketio.emit("train_log", {"text": "⏸ Training paused."})
+    socketio.emit("train_paused", {"paused": True})
+
+
+@socketio.on("train_resume")
+def on_train_resume(_=None):
+    global training_paused
+    training_paused = False
+    if training_source:
+        training_source.resume()
+    socketio.emit("train_log", {"text": "▶ Training resumed."})
+    socketio.emit("train_paused", {"paused": False})
+
+
 @socketio.on("train_stop")
 def on_train_stop(_=None):
-    global training_running, training_source
+    global training_running, training_paused, training_source
     training_running = False
+    training_paused = False
     if training_source:
+        training_source.resume()   # unblock pause loop before stopping
         training_source.stop()
         training_source = None
     socketio.emit("train_log", {"text": "Training collection stopped."})

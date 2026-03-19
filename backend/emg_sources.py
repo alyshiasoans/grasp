@@ -28,15 +28,28 @@ class SimulatedSource:
         self.n_channels = self.sig.shape[1]
         self.playback_speed = playback_speed
         self._stop = False
+        self._paused = False
 
     def stop(self):
         self._stop = True
+
+    def pause(self):
+        self._paused = True
+
+    def resume(self):
+        self._paused = False
 
     def stream(self):
         """Yield (sample_array,) one at a time at real-time pace."""
         dt = 1.0 / (self.Fs * self.playback_speed)
         t_start = time.perf_counter()
         for i, row in enumerate(self.sig):
+            if self._stop:
+                break
+            # Block while paused, adjusting t_start so timing stays correct
+            while self._paused and not self._stop:
+                time.sleep(0.05)
+                t_start = time.perf_counter() - i * dt
             if self._stop:
                 break
             yield row
@@ -139,6 +152,7 @@ class LiveSource:
         self.bytes_per_sample = 3 if hres == 1 else 2
         self.calibration_s = calibration_s
         self._stop = False
+        self._paused = False
         self._server_sock = None
         self._client_sock = None
         self._on_log = on_log or (lambda msg: None)
@@ -149,6 +163,7 @@ class LiveSource:
 
     def stop(self):
         self._stop = True
+        self._paused = False
         # Send stop command
         if self._client_sock:
             try:
@@ -170,6 +185,12 @@ class LiveSource:
             except Exception:
                 pass
             self._server_sock = None
+
+    def pause(self):
+        self._paused = True
+
+    def resume(self):
+        self._paused = False
 
     def _recv_exact(self, n):
         """Receive exactly n bytes from the client socket."""
@@ -272,6 +293,12 @@ class LiveSource:
 
                 # Yield one sample at a time, first emg_channels only, in mV
                 for row_idx in range(samples_per_chunk):
+                    if self._stop:
+                        break
+
+                    # Block while paused — discard live data so buffer doesn't overflow
+                    while self._paused and not self._stop:
+                        time.sleep(0.05)
                     if self._stop:
                         break
 
