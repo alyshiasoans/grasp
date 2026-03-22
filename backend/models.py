@@ -17,6 +17,7 @@ class User(db.Model):
     password_hash = db.Column(db.String(256), nullable=False)
     last_login = db.Column(db.DateTime)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
     training_streak = db.Column(db.Integer, default=0, nullable=False)
 
     # relationships
@@ -24,6 +25,7 @@ class User(db.Model):
     sessions = db.relationship("Session", back_populates="user", cascade="all, delete-orphan")
     gesture_trials = db.relationship("GestureTrial", back_populates="user", cascade="all, delete-orphan")
     model_versions = db.relationship("ModelVersion", back_populates="user", cascade="all, delete-orphan")
+    training_files = db.relationship("TrainingFile", back_populates="user", cascade="all, delete-orphan")
 
 
 class Gesture(db.Model):
@@ -80,6 +82,7 @@ class Session(db.Model):
     user = db.relationship("User", back_populates="sessions")
     session_gestures = db.relationship("SessionGesture", back_populates="session", cascade="all, delete-orphan")
     gesture_trials = db.relationship("GestureTrial", back_populates="session", cascade="all, delete-orphan")
+    training_files = db.relationship("TrainingFile", back_populates="session", cascade="all, delete-orphan")
 
 
 class SessionGesture(db.Model):
@@ -133,3 +136,19 @@ class ModelVersion(db.Model):
     is_active = db.Column(db.Boolean, default=False, nullable=False)
 
     user = db.relationship("User", back_populates="model_versions")
+
+
+class TrainingFile(db.Model):
+    __tablename__ = "training_files"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    session_id = db.Column(db.Integer, db.ForeignKey("sessions.id"))
+    file_name = db.Column(db.String(300), nullable=False)
+    file_path = db.Column(db.String(500), nullable=False)
+    num_samples = db.Column(db.Integer, default=0, nullable=False)
+    gestures = db.Column(db.Text)  # JSON list of gesture names
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+
+    user = db.relationship("User", back_populates="training_files")
+    session = db.relationship("Session", back_populates="training_files")

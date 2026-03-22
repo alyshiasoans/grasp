@@ -7,12 +7,18 @@ const NAV_ITEMS = [
   { key: 'progress', label: 'Progress',  icon: '📊' },
 ];
 
+const ADMIN_NAV_ITEMS = [
+  { key: 'dashboard', label: 'Dashboard', icon: '⊞' },
+];
+
 function Sidebar({ activePage, onNavigate, user, onLogout }) {
+  const items = user?.isAdmin ? ADMIN_NAV_ITEMS : NAV_ITEMS;
+
   return (
     <aside className="sidebar">
       <div className="sidebar-brand">GRASP</div>
       <nav className="sidebar-nav">
-        {NAV_ITEMS.map((item) => (
+        {items.map((item) => (
           <button
             key={item.key}
             className={`sidebar-link ${activePage === item.key ? 'active' : ''}`}

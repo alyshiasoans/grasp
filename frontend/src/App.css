@@ -667,7 +667,7 @@ body {
   cursor: pointer;
   transition: all 0.15s ease;
 }
-.btn-mode:first-child { border-right: 1px solid #d0d0d0; }
+.mode-toggle .btn-mode:first-child { border-right: 1px solid #d0d0d0; }
 .btn-mode.active {
   background: #5b6abf;
   color: #fff;
@@ -1472,4 +1472,80 @@ body {
 .test-retrain-dismiss {
   background: #5b6abf;
   color: #fff;
+}
+
+/* ── Admin Dashboard ── */
+.admin-user-select {
+  width: 100%;
+  max-width: 360px;
+  padding: 10px 14px;
+  font-size: 1rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 8px;
+  background: #f8f8fa;
+  color: #333;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.admin-summary-row {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.admin-stat-card {
+  flex: 1;
+  min-width: 140px;
+  text-align: center;
+  padding: 24px 16px;
+}
+
+.admin-stat-value {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: #5b6abf;
+  margin-bottom: 4px;
+}
+
+.admin-stat-label {
+  font-size: 0.85rem;
+  color: #888;
+  font-weight: 500;
+}
+
+.admin-table-card {
+  overflow-x: auto;
+}
+
+.admin-table-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #1a1a2e;
+  margin-bottom: 14px;
+}
+
+.admin-gesture-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.admin-gesture-table th,
+.admin-gesture-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #eee;
+}
+
+.admin-gesture-table th {
+  font-weight: 600;
+  color: #666;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.admin-row-locked {
+  opacity: 0.45;
 }

@@ -19,7 +19,7 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from emg_sources import SimulatedSource, LiveSource
-from models import db, User, Gesture, UserGesture, Session, SessionGesture, GestureTrial, ModelVersion
+from models import db, User, Gesture, UserGesture, Session, SessionGesture, GestureTrial, ModelVersion, TrainingFile
 
 # ── paths (relative to workspace root) ──────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -528,13 +528,13 @@ def register():
     data = request.get_json(silent=True) or {}
     first_name = (data.get("firstName") or "").strip()
     last_name = (data.get("lastName") or "").strip()
-    username = (data.get("username") or "").strip()
+    username = (data.get("username") or "").strip().lower()
     password = data.get("password") or ""
 
     if not all([first_name, last_name, username, password]):
         return jsonify({"error": "All fields are required"}), 400
 
-    if User.query.filter_by(username=username).first():
+    if User.query.filter(User.username.ilike(username)).first():
         return jsonify({"error": "Username already taken"}), 409
 
     user = User(
@@ -557,26 +557,53 @@ def register():
         ))
     db.session.commit()
 
-    return jsonify({"id": user.id, "username": user.username, "firstName": user.first_name, "lastName": user.last_name}), 201
+    return jsonify({"id": user.id, "username": user.username, "firstName": user.first_name, "lastName": user.last_name, "isAdmin": user.is_admin}), 201
 
 
 @app.route("/api/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}
-    username = (data.get("username") or "").strip()
+    username = (data.get("username") or "").strip().lower()
     password = data.get("password") or ""
 
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
 
-    user = User.query.filter_by(username=username).first()
+    user = User.query.filter(User.username.ilike(username)).first()
     if not user or not check_password_hash(user.password_hash, password):
         return jsonify({"error": "Invalid username or password"}), 401
 
     user.last_login = datetime.now(timezone.utc)
     db.session.commit()
 
-    return jsonify({"id": user.id, "username": user.username, "firstName": user.first_name, "lastName": user.last_name})
+    return jsonify({"id": user.id, "username": user.username, "firstName": user.first_name, "lastName": user.last_name, "isAdmin": user.is_admin})
+
+
+# ── Admin API ────────────────────────────────────────────────────────────────
+
+@app.route("/api/admin/users")
+def admin_users():
+    users = User.query.filter_by(is_admin=False).order_by(User.first_name, User.last_name).all()
+    return jsonify([
+        {"id": u.id, "firstName": u.first_name, "lastName": u.last_name, "username": u.username}
+        for u in users
+    ])
+
+
+@app.route("/api/admin/training-files/<int:user_id>")
+def admin_training_files(user_id):
+    files = TrainingFile.query.filter_by(user_id=user_id).order_by(TrainingFile.created_at.desc()).all()
+    return jsonify([
+        {
+            "id": f.id,
+            "fileName": f.file_name,
+            "numSamples": f.num_samples,
+            "gestures": json.loads(f.gestures) if f.gestures else [],
+            "createdAt": f.created_at.isoformat() if f.created_at else None,
+            "sessionId": f.session_id,
+        }
+        for f in files
+    ])
 
 
 # ── Dashboard API ───────────────────────────────────────────────────────────
@@ -854,10 +881,18 @@ def run_training_collector(mode="live", live_opts=None, user_id=None, session_mi
     n_ch = source.n_channels if hasattr(source, 'n_channels') else 64
 
     if collected:
-        os.makedirs(TRAINING_DIR, exist_ok=True)
+        # Resolve username for folder naming
+        folder_name = None
+        if user_id:
+            with app.app_context():
+                u = db.session.get(User, user_id)
+                if u:
+                    folder_name = u.username
+        user_dir = os.path.join(TRAINING_DIR, folder_name) if folder_name else TRAINING_DIR
+        os.makedirs(user_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"training_{ts}.npz"
-        filepath = os.path.join(TRAINING_DIR, filename)
+        filepath = os.path.join(user_dir, filename)
 
         labels = [c["label"] for c in collected]
         data_arrays = [c["data"] for c in collected]
@@ -938,6 +973,19 @@ def run_training_collector(mode="live", live_opts=None, user_id=None, session_mi
                         if ug:
                             ug.total_times_trained += 1
                             ug.times_trained = max(ug.times_trained, 1)
+
+                    # Record training file
+                    gesture_names = list(set(c["label"] for c in collected))
+                    tf = TrainingFile(
+                        user_id=user_id,
+                        session_id=sess.id,
+                        file_name=filename,
+                        file_path=os.path.relpath(filepath, BASE_DIR),
+                        num_samples=len(collected),
+                        gestures=json.dumps(gesture_names),
+                        created_at=ended_at,
+                    )
+                    db.session.add(tf)
 
                     db.session.commit()
                     socketio.emit("train_log", {"text": f"✓ Session saved to database (id={sess.id})"})

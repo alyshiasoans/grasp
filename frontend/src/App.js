@@ -4,6 +4,7 @@ import TrainingPage from './components/TrainingPage';
 import TestingPage from './components/TestingPage';
 import Sidebar from './components/Sidebar';
 import Dashboard from './components/Dashboard';
+import AdminDashboard from './components/AdminDashboard';
 import LoginPage from './components/LoginPage';
 import ProgressPage from './components/ProgressPage';
 
@@ -43,43 +44,53 @@ function App() {
         {/* Header */}
         <header className="header">
           <h1 className="title">
-            {activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Testing' : activePage === 'progress' ? 'Progress' : 'Dashboard'}
+            {user?.isAdmin
+              ? 'Admin Dashboard'
+              : activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Testing' : activePage === 'progress' ? 'Progress' : 'Dashboard'}
           </h1>
-          <div className="header-right">
-            <div className="header-mode-toggle">
-              <div className="mode-toggle">
-                <button
-                  className={`btn btn-mode ${mode === 'simulated' ? 'active' : ''}`}
-                  onClick={() => setMode('simulated')}
-                >
-                  Simulated
-                </button>
-                <button
-                  className={`btn btn-mode ${mode === 'live' ? 'active' : ''}`}
-                  onClick={() => setMode('live')}
-                >
-                  Live EMG
-                </button>
+          {!user?.isAdmin && (
+            <div className="header-right">
+              <div className="header-mode-toggle">
+                <div className="mode-toggle">
+                  <button
+                    className={`btn btn-mode ${mode === 'simulated' ? 'active' : ''}`}
+                    onClick={() => setMode('simulated')}
+                  >
+                    Simulated
+                  </button>
+                  <button
+                    className={`btn btn-mode ${mode === 'live' ? 'active' : ''}`}
+                    onClick={() => setMode('live')}
+                  >
+                    Live EMG
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </header>
 
-        <div style={{ display: activePage === 'dashboard' ? 'block' : 'none' }}>
-          <Dashboard user={user} />
-        </div>
+        {user?.isAdmin ? (
+          <AdminDashboard user={user} />
+        ) : (
+          <>
+            <div style={{ display: activePage === 'dashboard' ? 'block' : 'none' }}>
+              <Dashboard user={user} />
+            </div>
 
-        <div style={{ display: activePage === 'training' ? 'block' : 'none' }}>
-          <TrainingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
-        </div>
+            <div style={{ display: activePage === 'training' ? 'block' : 'none' }}>
+              <TrainingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
+            </div>
 
-        <div style={{ display: activePage === 'testing' ? 'block' : 'none' }}>
-          <TestingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
-        </div>
+            <div style={{ display: activePage === 'testing' ? 'block' : 'none' }}>
+              <TestingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
+            </div>
 
-        <div style={{ display: activePage === 'progress' ? 'block' : 'none' }}>
-          <ProgressPage user={user} />
-        </div>
+            <div style={{ display: activePage === 'progress' ? 'block' : 'none' }}>
+              <ProgressPage user={user} />
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
