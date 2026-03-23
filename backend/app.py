@@ -6,7 +6,7 @@ Supports two modes:
   • live       – streams from OT BioLab TCP (Quattrocento 64-ch HD-EMG)
 """
 
-import os, sys, threading, time, random, json
+import os, sys, threading, time, random, json, sqlite3
 import numpy as np
 from scipy.signal import butter, lfilter, lfilter_zi, iirnotch
 from scipy.io import loadmat
@@ -70,6 +70,60 @@ training_thread = None
 training_running = False
 training_paused = False
 training_source = None
+
+
+def ensure_sqlite_schema():
+    """
+    Apply lightweight schema upgrades for older local SQLite databases.
+
+    `db.create_all()` only creates missing tables, so existing files need
+    explicit ALTER TABLE statements when new columns are added.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("PRAGMA table_info(users)")
+        user_columns = {row[1] for row in cursor.fetchall()}
+
+        if "is_admin" not in user_columns:
+            cursor.execute(
+                "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"
+            )
+
+        conn.commit()
+
+
+def initialize_database():
+    ensure_sqlite_schema()
+    db.create_all()
+
+    # Seed gesture table if empty
+    if Gesture.query.count() == 0:
+        for name, img in [
+            ("Open", "/gestures/open.jpg"),
+            ("Close", "/gestures/close.jpg"),
+            ("Thumbs Up", "/gestures/thumbs_up.jpg"),
+            ("Peace", "/gestures/peace.jpg"),
+            ("Index Point", "/gestures/index_point.jpg"),
+            ("Four", "/gestures/four.jpg"),
+            ("Okay", "/gestures/okay.jpg"),
+            ("Spiderman", "/gestures/spiderman.jpg"),
+        ]:
+            db.session.add(Gesture(gesture_name=name, gesture_image=img))
+        db.session.commit()
+        print("[db] seeded 8 gestures")
+
+    # Ensure all users have Open and Close unlocked
+    starter_gestures = Gesture.query.filter(Gesture.gesture_name.in_(["Open", "Close"])).all()
+    for g in starter_gestures:
+        ugs = UserGesture.query.filter_by(gesture_id=g.id, is_unlocked=False).all()
+        for ug in ugs:
+            ug.is_unlocked = True
+    db.session.commit()
+
+
+with app.app_context():
+    initialize_database()
 
 
 def feats(w, thr=0.01):
@@ -1056,32 +1110,5 @@ def on_train_stop(_=None):
 
 
 if __name__ == "__main__":
-    with app.app_context():
-        db.create_all()
-
-        # Seed gesture table if empty
-        if Gesture.query.count() == 0:
-            for name, img in [
-                ("Open", "/gestures/open.jpg"),
-                ("Close", "/gestures/close.jpg"),
-                ("Thumbs Up", "/gestures/thumbs_up.jpg"),
-                ("Peace", "/gestures/peace.jpg"),
-                ("Index Point", "/gestures/index_point.jpg"),
-                ("Four", "/gestures/four.jpg"),
-                ("Okay", "/gestures/okay.jpg"),
-                ("Spiderman", "/gestures/spiderman.jpg"),
-            ]:
-                db.session.add(Gesture(gesture_name=name, gesture_image=img))
-            db.session.commit()
-            print("[db] seeded 8 gestures")
-
-        # Ensure all users have Open and Close unlocked
-        starter_gestures = Gesture.query.filter(Gesture.gesture_name.in_(["Open", "Close"])).all()
-        for g in starter_gestures:
-            ugs = UserGesture.query.filter_by(gesture_id=g.id, is_unlocked=False).all()
-            for ug in ugs:
-                ug.is_unlocked = True
-        db.session.commit()
-
     print("[server] starting on http://localhost:5050")
     socketio.run(app, host="0.0.0.0", port=5050, debug=False)
