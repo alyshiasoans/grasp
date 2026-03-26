@@ -1056,6 +1056,103 @@ body {
   color: rgba(255,255,255,0.85);
 }
 
+.sidebar-device-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.sidebar-device-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.25);
+  flex-shrink: 0;
+}
+
+.sidebar-device-dot.connected {
+  background: #4caf50;
+  box-shadow: 0 0 6px rgba(76, 175, 80, 0.5);
+}
+
+.sidebar-device-label {
+  font-size: 0.95rem;
+  color: rgba(255,255,255,0.45);
+  font-weight: 500;
+}
+
+.sidebar-device-dot.connected + .sidebar-device-label {
+  color: rgba(255,255,255,0.7);
+}
+
+.sidebar-battery {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.sidebar-battery-icon {
+  font-size: 0.85rem;
+}
+
+.sidebar-battery-text {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: rgba(255,255,255,0.7);
+  min-width: 32px;
+}
+
+.sidebar-battery-bar {
+  flex: 1;
+  height: 6px;
+  background: rgba(255,255,255,0.12);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.sidebar-battery-fill {
+  height: 100%;
+  background: #4caf50;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.sidebar-battery-fill.mid {
+  background: #f0a500;
+}
+
+.sidebar-battery-fill.low {
+  background: #e74c3c;
+}
+
+.sidebar-battery-refresh {
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.5);
+  font-size: 1.1rem;
+  cursor: pointer;
+  padding: 0 2px;
+  line-height: 1;
+  transition: all 0.15s;
+}
+
+.sidebar-battery-refresh:hover {
+  color: rgba(255,255,255,0.9);
+}
+
+.sidebar-battery-refresh.spinning {
+  animation: spin-refresh 0.8s linear infinite;
+  color: rgba(255,255,255,0.9);
+}
+
+@keyframes spin-refresh {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 /* ── Progress page ── */
 .progress-cards-grid {
   display: grid;
@@ -1548,4 +1645,164 @@ body {
 
 .admin-row-locked {
   opacity: 0.45;
+}
+
+/* ─── Live EMG Connection Popup ─── */
+.live-popup-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.live-popup {
+  width: 800px;
+  max-width: 94vw;
+  min-height: 450px;
+  padding: 64px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.live-popup-title {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.live-popup-subtitle {
+  font-size: 0.95rem;
+  color: #777;
+  line-height: 1.5;
+  margin-bottom: 26px;
+  text-align: center;
+}
+
+.live-popup-fields {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.live-popup-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #555;
+  flex: 1;
+}
+
+.live-popup-input {
+  padding: 11px 14px;
+  border: 1px solid #d0d0d0;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  background: #f8f8fa;
+  color: #333;
+  transition: border-color 0.15s;
+}
+
+.live-popup-input:focus {
+  outline: none;
+  border-color: #5b6abf;
+  background: #fff;
+}
+
+.live-popup-input-port {
+  max-width: 100px;
+}
+
+.live-popup-value {
+  padding: 12px 16px;
+  background: #f0f0f3;
+  border-radius: 8px;
+  font-size: 1.1rem;
+  color: #333;
+  font-weight: 500;
+  font-family: monospace;
+}
+
+.live-popup-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 22px;
+  padding: 10px 14px;
+  background: #f5f5f8;
+  border-radius: 8px;
+}
+
+.live-popup-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.live-popup-dot-disconnected {
+  background: #bbb;
+}
+
+.live-popup-dot-connecting {
+  background: #f0a500;
+  animation: pulse-dot 1s infinite;
+}
+
+.live-popup-dot-connected {
+  background: #2e7d32;
+}
+
+.live-popup-dot-error {
+  background: #c0392b;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.live-popup-status-text {
+  font-size: 0.92rem;
+  color: #555;
+  font-weight: 500;
+}
+
+.live-popup-actions {
+  display: flex;
+  gap: 16px;
+  justify-content: center;
+  margin-top: auto;
+  padding-top: 24px;
+}
+
+.live-popup-actions .btn {
+  padding: 14px 36px;
+  font-size: 1rem;
+}
+
+.live-popup-btn-cancel {
+  background: #f0f0f3;
+  color: #666;
+}
+
+.live-popup-btn-cancel:hover {
+  background: #e0e0e5;
+}
+
+.live-popup-btn-confirm {
+  background: #5b6abf;
+  color: #fff;
+}
+
+.live-popup-btn-confirm:hover:not(:disabled) {
+  background: #4a58a8;
 }

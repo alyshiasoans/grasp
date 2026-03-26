@@ -6,8 +6,10 @@ Supports two modes:
   • live       – streams from OT BioLab TCP (Quattrocento 64-ch HD-EMG)
 """
 
-import os, sys, threading, time, random, json, sqlite3
+import os, sys, threading, time, random, json, sqlite3, socket, re
 import numpy as np
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 from scipy.signal import butter, lfilter, lfilter_zi, iirnotch
 from scipy.io import loadmat
 from collections import deque
@@ -359,6 +361,7 @@ def run_worker(mode="simulated", live_opts=None):
 
     # Stream ended (mat file finished, or live connection closed)
     if mode == "live":
+        socketio.emit("device_status", {"status": "disconnected"})
         socketio.emit("state", {"label": "STOPPED", "gesture": "—", "color": "#888888", "act": 0.0})
         socketio.emit("log", {"text": "— live stream ended —"})
     else:
@@ -377,6 +380,80 @@ def on_connect():
 @socketio.on("disconnect")
 def on_disconnect():
     print("[server] client disconnected")
+
+
+@socketio.on("check_device")
+def on_check_device(data=None):
+    """Listen briefly to see if the Sessantaquattro+ connects."""
+    data = data or {}
+    host = data.get("host", "0.0.0.0")
+    port = int(data.get("port", 45454))
+    timeout = 6  # seconds to wait for the device to connect
+
+    def _probe():
+        srv = None
+        cli = None
+        try:
+            srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            srv.bind((host, port))
+            srv.listen(1)
+            srv.settimeout(timeout)
+            socketio.emit("device_status", {"status": "connecting"})
+            cli, addr = srv.accept()
+            cli.close()
+            srv.close()
+            socketio.emit("device_status", {"status": "connected"})
+        except socket.timeout:
+            socketio.emit("device_status", {
+                "status": "error",
+                "error": "Device not found. Check WiFi connection and try again."
+            })
+        except OSError as e:
+            socketio.emit("device_status", {"status": "error", "error": str(e)})
+        finally:
+            if cli:
+                try: cli.close()
+                except: pass
+            if srv:
+                try: srv.close()
+                except: pass
+
+    threading.Thread(target=_probe, daemon=True).start()
+
+
+DEVICE_WEB_UI = "http://192.168.1.1"
+
+
+def _scrape_battery(url=DEVICE_WEB_UI):
+    """Fetch the Sessantaquattro+ web UI and extract battery percentage."""
+    try:
+        # Cache-bust to ensure fresh data
+        bust_url = f"{url}?_t={int(time.time())}"
+        req = Request(bust_url, headers={
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        })
+        resp = urlopen(req, timeout=4)
+        html = resp.read().decode("utf-8", errors="ignore")
+        m = re.search(r'Battery Level:\s*</td>\s*<td[^>]*>\s*(\d+)%', html)
+        if m:
+            return int(m.group(1))
+    except (URLError, OSError):
+        pass
+    return None
+
+
+@socketio.on("get_battery")
+def on_get_battery(_=None):
+    def _query():
+        level = _scrape_battery()
+        if level is not None:
+            socketio.emit("battery_level", {"level": level})
+        else:
+            socketio.emit("battery_level", {"level": None, "error": "Could not read battery"})
+            socketio.emit("device_status", {"status": "disconnected"})
+    threading.Thread(target=_query, daemon=True).start()
 
 
 @socketio.on("start")
@@ -763,7 +840,7 @@ INITIAL_REST_S = 6.0     # initial rest / calibration period
 REPS_PER_GESTURE = 5     # repetitions of each gesture
 
 
-def run_training_collector(mode="live", live_opts=None, user_id=None, session_minutes=5, gesture_ids=None):
+def run_training_collector(mode="live", live_opts=None, user_id=None, session_minutes=5, gesture_ids=None, override_sequence=None, override_mat_path=None):
     """
     Guide the user through a randomised gesture sequence and record
     the raw EMG samples for each gesture.  Saves a .npz file and
@@ -796,6 +873,11 @@ def run_training_collector(mode="live", live_opts=None, user_id=None, session_mi
 
     sequence = gesture_names * reps_per
     random.shuffle(sequence)
+
+    # Allow explicit sequence override (for testing)
+    if override_sequence:
+        sequence = override_sequence
+
     total = len(sequence)
 
     socketio.emit("train_log", {"text": f"Collecting {total} gestures ({REPS_PER_GESTURE} reps × {len(gesture_names)} classes)"})
@@ -815,8 +897,11 @@ def run_training_collector(mode="live", live_opts=None, user_id=None, session_mi
         Fs = source.Fs
         socketio.emit("train_log", {"text": f"Live mode — {source.n_channels}ch @ {Fs} Hz"})
     else:
+        sim_path = MAT_PATH
+        if override_mat_path:
+            sim_path = os.path.join(BASE_DIR, override_mat_path)
         try:
-            source = SimulatedSource(MAT_PATH, PLAYBACK_SPEED)
+            source = SimulatedSource(sim_path, PLAYBACK_SPEED)
         except Exception as e:
             socketio.emit("train_log", {"text": f"ERROR loading .mat: {e}"})
             training_running = False
@@ -1067,10 +1152,12 @@ def on_train_start(data=None):
     user_id = data.get("userId")
     session_minutes = int(data.get("sessionMinutes", 5))
     gesture_ids = data.get("gestureIds")  # optional list of specific gesture IDs
+    override_sequence = data.get("overrideSequence")  # optional explicit gesture list
+    override_mat_path = data.get("overrideMatPath")  # optional .mat file path
     training_thread = threading.Thread(
         target=run_training_collector,
         args=(mode, live_opts),
-        kwargs={"user_id": user_id, "session_minutes": session_minutes, "gesture_ids": gesture_ids},
+        kwargs={"user_id": user_id, "session_minutes": session_minutes, "gesture_ids": gesture_ids, "override_sequence": override_sequence, "override_mat_path": override_mat_path},
         daemon=True,
     )
     training_thread.start()
