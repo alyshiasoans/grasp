@@ -21,7 +21,7 @@ from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from emg_sources import SimulatedSource, LiveSource
-from models import db, User, Gesture, UserGesture, Session, SessionGesture, GestureTrial, ModelVersion, TrainingFile
+from models import db, User, Gesture, UserGesture, Session, TrainingGesture, TestingTrial, ModelVersion, TrainingFile
 
 # ── paths (relative to workspace root) ──────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -582,30 +582,15 @@ def record_test_trial():
     retry_count = data.get("retryCount", 0)
     trial_number = data.get("trialNumber", 1)
 
-    # Create or find session_gesture
-    sg = SessionGesture.query.filter_by(session_id=session_id, gesture_id=gesture_id).first()
-    if not sg:
-        order = SessionGesture.query.filter_by(session_id=session_id).count() + 1
-        sg = SessionGesture(
-            session_id=session_id,
-            gesture_id=gesture_id,
-            display_order=order,
-            target_repetitions=1,
-            completed_repetitions=0,
-            was_skipped=False,
-        )
-        db.session.add(sg)
-        db.session.flush()
+    # Determine display_order for this trial within the testing session
+    display_order = TestingTrial.query.filter_by(session_id=session_id).count() + 1
 
-    sg.completed_repetitions += 1
-
-    trial = GestureTrial(
+    trial = TestingTrial(
         user_id=user_id,
         session_id=session_id,
-        session_gesture_id=sg.id,
         gesture_id=gesture_id,
+        display_order=display_order,
         trial_number=trial_number,
-        attempt_type="testing",
         ground_truth=ground_truth,
         prediction=prediction,
         confidence=confidence,
@@ -735,6 +720,109 @@ def admin_training_files(user_id):
         }
         for f in files
     ])
+
+
+@app.route("/api/admin/models/<int:user_id>")
+def admin_models(user_id):
+    models = ModelVersion.query.filter_by(user_id=user_id).order_by(ModelVersion.version_number.desc()).all()
+    return jsonify([
+        {
+            "id": m.id,
+            "versionNumber": m.version_number,
+            "accuracy": m.accuracy,
+            "filePath": m.file_path,
+            "trainingDate": m.training_date.isoformat() if m.training_date else None,
+            "isActive": m.is_active,
+        }
+        for m in models
+    ])
+
+
+@app.route("/api/admin/models/<int:user_id>/set-active", methods=["POST"])
+def admin_set_active_model(user_id):
+    data = request.get_json(silent=True) or {}
+    model_id = data.get("modelId")
+    if not model_id:
+        return jsonify({"error": "modelId required"}), 400
+
+    # Deactivate all models for this user, then activate the chosen one
+    ModelVersion.query.filter_by(user_id=user_id).update({"is_active": False})
+    mv = ModelVersion.query.filter_by(id=model_id, user_id=user_id).first()
+    if not mv:
+        return jsonify({"error": "Model not found"}), 404
+    mv.is_active = True
+    db.session.commit()
+    return jsonify({"ok": True, "activeModelId": mv.id})
+
+
+@app.route("/api/admin/train-model", methods=["POST"])
+def admin_train_model():
+    """Train an LDA model from selected training files."""
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("userId")
+    file_ids = data.get("trainingFileIds", [])
+
+    if not user_id or not file_ids:
+        return jsonify({"error": "userId and trainingFileIds required"}), 400
+
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    # Fetch selected training files
+    files = TrainingFile.query.filter(
+        TrainingFile.id.in_(file_ids),
+        TrainingFile.user_id == user_id,
+    ).all()
+    if not files:
+        return jsonify({"error": "No matching training files found"}), 404
+
+    tf_rows = []
+    for f in files:
+        gesture_order = json.loads(f.gestures) if f.gestures else []
+        tf_rows.append({
+            "id": f.id,
+            "file_name": f.file_name,
+            "file_path": f.file_path,
+            "gestures": gesture_order,
+            "session_id": f.session_id,
+        })
+
+    logs = []
+    try:
+        from train_model import train_model
+        result = train_model(
+            tf_rows,
+            {"id": user.id, "username": user.username},
+            on_log=lambda msg: logs.append(msg),
+        )
+    except Exception as e:
+        return jsonify({"error": str(e), "logs": logs}), 500
+
+    # Create ModelVersion record — deactivate existing, make new one active
+    max_ver = db.session.query(db.func.max(ModelVersion.version_number)).filter_by(user_id=user_id).scalar() or 0
+    ModelVersion.query.filter_by(user_id=user_id, is_active=True).update({"is_active": False})
+    mv = ModelVersion(
+        user_id=user_id,
+        version_number=max_ver + 1,
+        training_date=datetime.now(timezone.utc),
+        accuracy=result["accuracy"],
+        file_path=result["model_path"],
+        is_active=True,
+    )
+    db.session.add(mv)
+    db.session.commit()
+
+    logs.append(f"✓ Model v{mv.version_number} saved (id={mv.id})")
+
+    return jsonify({
+        "modelId": mv.id,
+        "versionNumber": mv.version_number,
+        "accuracy": result["accuracy"],
+        "filePath": result["model_path"],
+        "nSamples": result["n_samples"],
+        "logs": logs,
+    })
 
 
 # ── Dashboard API ───────────────────────────────────────────────────────────
@@ -1069,43 +1157,20 @@ def run_training_collector(mode="live", live_opts=None, user_id=None, session_mi
                     # Build gesture name → Gesture.id map
                     gesture_map = {g.gesture_name: g.id for g in Gesture.query.all()}
 
-                    # Group collected by gesture name
-                    from collections import Counter
-                    rep_counter = Counter()
-                    for c in collected:
+                    # Create one TrainingGesture per collected gesture in global presentation order
+                    for global_order, c in enumerate(collected, 1):
                         gname = c["label"]
                         gid = gesture_map.get(gname)
                         if not gid:
                             continue
-                        rep_counter[gname] += 1
-                        order = rep_counter[gname]
 
-                        sg = SessionGesture(
+                        tg = TrainingGesture(
                             session_id=sess.id,
                             gesture_id=gid,
-                            display_order=order,
-                            target_repetitions=1,
-                            completed_repetitions=1,
-                            was_skipped=False,
+                            display_order=global_order,
+                            completed=True,
                         )
-                        db.session.add(sg)
-                        db.session.flush()
-
-                        trial = GestureTrial(
-                            user_id=user_id,
-                            session_id=sess.id,
-                            session_gesture_id=sg.id,
-                            gesture_id=gid,
-                            trial_number=order,
-                            attempt_type="training",
-                            ground_truth=gname,
-                            prediction=None,
-                            confidence=None,
-                            retry_count=0,
-                            was_correct=None,
-                            was_skipped=False,
-                        )
-                        db.session.add(trial)
+                        db.session.add(tg)
 
                         # Update user_gesture stats
                         ug = UserGesture.query.filter_by(user_id=user_id, gesture_id=gid).first()
