@@ -1,524 +1,1101 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+/**
+ * TestingPage.jsx — EMG Rehabilitation Platform
+ *
+ * LIVE EMG FIXES vs previous version
+ * ─────────────────────────────────────────────────────────────────────────────
+ * 1. T_ON = 2.4, T_OFF = 1.8 — matched to RealTimeGestureClassifier.py exactly.
+ *    as RMS/rest_mean so values like 1.0 = "onset", 2.0+ = "strong gesture".
+ *    The EMG strip threshold lines now reflect these real values.
+ *
+ * 2. Double-classification race removed. The onLog handler no longer re-fires
+ *    classifyRef on the '★  final:' line — that caused a second call on the
+ *    already-advanced gesture. The onState ACTIVE→REST transition is the single
+ *    authoritative source. The '★  final:' line is still logged for display.
+ *
+ * 3. Sim ticker no longer depends on `phase` — it keeps running through the
+ *    mismatch overlay so activation doesn't reset when the overlay appears.
+ *    A `simRunning` ref gates it instead of the phase dep.
+ *
+ * 4. `signal` event now handled correctly. Backend emits:
+ *      { flexors:[{x,y}...], extensors:[{x,y}...] }
+ *    We derive a synthetic 64-channel array from the median of each array
+ *    so the SensorStatusBar stays meaningful in live mode.
+ *
+ * GAME BEHAVIOUR
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Activation bar still shows the live EMG level, but the ball is no longer
+ * directly synced to that bar.
+ *
+ * Ball logic now works like this:
+ * 1. Resting hand  → ball stays low.
+ * 2. Activated hand → ball rises to a stable hover height.
+ * 3. When classification is available for the current attempt:
+ *    - correct gesture   → ball smoothly locks to the gap center
+ *    - incorrect gesture → ball smoothly locks to a miss lane, so it hits
+ * 4. Pipe spacing in Normal mode is ~4.5 s.
+ */
 
-const API = 'http://localhost:5050';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+
+// ─────────────────────────────────────────────────────────────────────────────
+const API            = 'http://localhost:5050';
+const MAX_RETRIES    = 3;
+const CHANNEL_COUNT  = 64;
+const GOOD_THRESHOLD = 50;
+const FAIR_THRESHOLD = 30;
+
+// Threshold
+const T_ON  = 1 //#2.4;   // activation ratio to start gesture
+const T_OFF = 0.6 //1.8;   // activation ratio to end gesture
+
+const GESTURE_COLORS = {
+  'Open':'#00e5ff',  'Close':'#ff4081',   'Thumbs Up':'#69ff47',
+  'Peace':'#ffd740', 'Index Point':'#e040fb', 'Four':'#ff6d00',
+  'Okay':'#00e676',  'Spiderman':'#ff1744',
+};
+const ALL_GESTURES = Object.keys(GESTURE_COLORS);
 
 const GESTURE_IMAGES = {
-  'Open': '/gestures/open.jpg',
-  'Close': '/gestures/close.jpg',
-  'Thumbs Up': '/gestures/thumbs_up.jpg',
-  'Peace': '/gestures/peace.jpg',
-  'Index Point': '/gestures/index_point.jpg',
-  'Four': '/gestures/four.jpg',
-  'Okay': '/gestures/okay.jpg',
-  'Spiderman': '/gestures/spiderman.jpg',
+  'Open':'/gestures/open.jpg',            'Close':'/gestures/close.jpg',
+  'Thumbs Up':'/gestures/thumbs_up.jpg',  'Peace':'/gestures/peace.jpg',
+  'Index Point':'/gestures/index_point.jpg', 'Four':'/gestures/four.jpg',
+  'Okay':'/gestures/okay.jpg',            'Spiderman':'/gestures/spiderman.jpg',
 };
 
-const MAX_RETRIES = 3;
+const SIM_GESTURE_ORDER = [
+  'Okay','Open','Peace','Peace','Thumbs Up','Spiderman','Spiderman','Thumbs Up',
+  'Open','Thumbs Up','Open','Open','Close','Index Point','Four','Thumbs Up',
+  'Four','Index Point','Okay','Open','Index Point','Index Point','Four','Okay',
+  'Close','Spiderman','Okay','Four','Thumbs Up','Peace','Four','Spiderman',
+  'Peace','Close','Close','Peace','Index Point','Okay','Spiderman','Close',
+];
 
-function TestingPage({ socket, connected, user, mode, liveOpts }) {
-  // Setup
-  const [gestures, setGestures] = useState([]);
-  const [gesturesLoaded, setGesturesLoaded] = useState(false);
-  const [sessionLength, setSessionLength] = useState(null);
+// ── Canvas constants ──────────────────────────────────────────────────────────
+const GW                     = 700;
+const GH                     = 320;
+const BX                     = 120;
+const BR                     = 12;
+const PW                     = 68;
+const GAP_H                  = 110;
+const BASE_SPEED             = 1.5;
+const NORMAL_PIPE_INTERVAL_S = 6; //from 4.5
+const PIPE_SPACING           = BASE_SPEED * 60 * NORMAL_PIPE_INTERVAL_S; // ~405 px at normal speed
+const EVAL_X                 = BX + BR + 4;
+const MARGIN                 = 18;
+const BALL_GROUND_Y          = GH - MARGIN - BR - 10;
+const BALL_HOVER_Y           = GH * 0.56;
 
-  // Session state
-  const [sessionId, setSessionId] = useState(null);
-  const [sequence, setSequence] = useState([]);
-  const [currentIdx, setCurrentIdx] = useState(0);
-  const [phase, setPhase] = useState('setup'); // setup | prompting | classifying | result | done
-  const [retryCount, setRetryCount] = useState(0);
+function clamp(v, lo, hi) {
+  return Math.max(lo, Math.min(hi, v));
+}
 
-  // Classification result
-  const [prediction, setPrediction] = useState(null);
-  const [confidence, setConfidence] = useState(null);
-  const [wasCorrect, setWasCorrect] = useState(null);
+function gapCenterY(gapTop) {
+  return gapTop + GAP_H / 2;
+}
 
-  // Signal display
-  const flexorRef = useRef([]);
-  const extensorRef = useRef([]);
+function missYForPipe(pipe) {
+  const aboveY = clamp(pipe.gapTop / 2, MARGIN + BR, GH - MARGIN - BR);
+  const belowY = clamp(
+    pipe.gapTop + GAP_H + (GH - (pipe.gapTop + GAP_H)) / 2,
+    MARGIN + BR,
+    GH - MARGIN - BR,
+  );
+  const roomAbove = pipe.gapTop - (MARGIN + BR);
+  const roomBelow = (GH - MARGIN - BR) - (pipe.gapTop + GAP_H);
+  return roomBelow >= roomAbove ? belowY : aboveY;
+}
 
-  // Session stats
-  const [stats, setStats] = useState({ correct: 0, incorrect: 0, skipped: 0 });
-  const [logs, setLogs] = useState([]);
-  const logBottomRef = useRef(null);
-
-  // Retrain popup
-  const [retrainGesture, setRetrainGesture] = useState(null);
-
-  // Fetch eligible gestures
-  useEffect(() => {
-    if (!user?.id) return;
-    setGesturesLoaded(false);
-    fetch(`${API}/api/testing/gestures/${user.id}`)
-      .then(r => r.json())
-      .then(data => {
-        setGestures(data.gestures || []);
-        setGesturesLoaded(true);
-      })
-      .catch(() => setGesturesLoaded(true));
-  }, [user?.id]);
-
-  // Socket listeners for classification
-  useEffect(() => {
-    if (!socket) return;
-
-    const onState = (data) => {
-      if (data.gesture && data.gesture !== 'REST' && data.gesture !== '—' && data.gesture !== 'DONE' && data.label !== 'STOPPED') {
-        // Final classification received
-        if (data.label === 'REST' && data.gesture !== 'REST') {
-          // Gesture ended — this is the final vote
-          setPrediction(data.gesture);
-          setConfidence(data.act);
-          setPhase('result');
-        }
-      }
-    };
-
-    const onLog = (data) => {
-      setLogs(prev => [...prev, data.text].slice(-80));
-      // Detect final classification from log
-      if (data.text && data.text.startsWith('★  final:')) {
-        const match = data.text.match(/★\s+final:\s+(.+?)\s+\(/);
-        if (match) {
-          setPrediction(match[1]);
-          setPhase('result');
-        }
-      }
-    };
-
-    const onSignal = (data) => {
-      flexorRef.current = data.flexors || [];
-      extensorRef.current = data.extensors || [];
-    };
-
-    socket.on('state', onState);
-    socket.on('log', onLog);
-    socket.on('signal', onSignal);
-
-    return () => {
-      socket.off('state', onState);
-      socket.off('log', onLog);
-      socket.off('signal', onSignal);
-    };
-  }, [socket]);
-
-  // Auto-scroll log
-  useEffect(() => {
-    if (logBottomRef.current) {
-      logBottomRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [logs]);
-
-  const currentGesture = sequence[currentIdx] || null;
-  const eligibleGestures = gestures.filter(g => g.eligible);
-  const progressPct = sequence.length > 0 ? Math.round((currentIdx / sequence.length) * 100) : 0;
-
-  // Start session
-  const handleStart = useCallback(async () => {
-    try {
-      // Create session
-      const sessRes = await fetch(`${API}/api/testing/session`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id, plannedDuration: sessionLength * 60 }),
-      });
-      const sessData = await sessRes.json();
-      setSessionId(sessData.sessionId);
-
-      // Get weighted sequence
-      const seqRes = await fetch(`${API}/api/testing/sequence/${user.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count: sessionLength }),
-      });
-      const seqData = await seqRes.json();
-      if (seqData.error) {
-        setLogs(prev => [...prev, `Error: ${seqData.error}`]);
-        return;
-      }
-
-      setSequence(seqData.sequence);
-      setCurrentIdx(0);
-      setRetryCount(0);
-      setStats({ correct: 0, incorrect: 0, skipped: 0 });
-      setLogs([]);
-      setPrediction(null);
-      setConfidence(null);
-      setWasCorrect(null);
-      setRetrainGesture(null);
-      setPhase('prompting');
-
-      // Start the classification worker
-      if (socket) {
-        socket.emit('start', { mode, liveOpts: mode === 'live' ? liveOpts : {} });
-      }
-    } catch (err) {
-      setLogs(prev => [...prev, `Error starting session: ${err.message}`]);
-    }
-  }, [user, sessionLength, mode, liveOpts, socket]);
-
-  // Record a trial result
-  const recordTrial = useCallback(async (isCorrect, isSkipped = false) => {
-    if (!currentGesture || !sessionId) return;
-
-    try {
-      const res = await fetch(`${API}/api/testing/trial`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: user.id,
-          sessionId,
-          gestureId: currentGesture.gestureId,
-          prediction: prediction || 'skipped',
-          confidence: confidence || 0,
-          groundTruth: currentGesture.name,
-          wasCorrect: isCorrect,
-          wasSkipped: isSkipped,
-          retryCount,
-          trialNumber: currentIdx + 1,
-        }),
-      });
-      const data = await res.json();
-
-      // Check if gesture needs retraining
-      if (data.accuracy !== null && data.accuracy < 50) {
-        setRetrainGesture(currentGesture.name);
-      }
-
-      return data;
-    } catch (err) {
-      setLogs(prev => [...prev, `Error recording trial: ${err.message}`]);
-    }
-  }, [currentGesture, sessionId, user, prediction, confidence, retryCount, currentIdx]);
-
-  // User confirms correct
-  const handleCorrect = useCallback(async () => {
-    setWasCorrect(true);
-    setStats(prev => ({ ...prev, correct: prev.correct + 1 }));
-    setLogs(prev => [...prev, `✓ ${currentGesture.name} classified correctly as ${prediction}`]);
-    await recordTrial(true, false);
-    advanceToNext();
-  }, [currentGesture, prediction, recordTrial]);
-
-  // User says incorrect
-  const handleIncorrect = useCallback(async () => {
-    setWasCorrect(false);
-    setStats(prev => ({ ...prev, incorrect: prev.incorrect + 1 }));
-    setLogs(prev => [...prev, `✗ ${currentGesture.name} misclassified as ${prediction}`]);
-    await recordTrial(false, false);
-
-    if (retryCount < MAX_RETRIES - 1) {
-      // Retry
-      setRetryCount(prev => prev + 1);
-      setPrediction(null);
-      setConfidence(null);
-      setWasCorrect(null);
-      setPhase('prompting');
-      setLogs(prev => [...prev, `Retry ${retryCount + 2}/${MAX_RETRIES}...`]);
-    } else {
-      // Max retries reached
-      setLogs(prev => [...prev, `Max retries reached for ${currentGesture.name}`]);
-      advanceToNext();
-    }
-  }, [currentGesture, prediction, recordTrial, retryCount]);
-
-  // Skip gesture
-  const handleSkip = useCallback(async () => {
-    setStats(prev => ({ ...prev, skipped: prev.skipped + 1 }));
-    setLogs(prev => [...prev, `⟶ Skipped ${currentGesture?.name}`]);
-    await recordTrial(false, true);
-    advanceToNext();
-  }, [currentGesture, recordTrial]);
-
-  // Advance to next gesture
-  const advanceToNext = useCallback(() => {
-    setRetrainGesture(null);
-    setPrediction(null);
-    setConfidence(null);
-    setWasCorrect(null);
-    setRetryCount(0);
-
-    if (currentIdx + 1 >= sequence.length) {
-      // Session complete
-      endSession('completed');
-    } else {
-      setCurrentIdx(prev => prev + 1);
-      setPhase('prompting');
-    }
-  }, [currentIdx, sequence.length]);
-
-  // End session
-  const endSession = useCallback(async (status = 'completed') => {
-    setPhase('done');
-    if (socket) {
-      socket.emit('stop');
-    }
-    if (sessionId) {
-      try {
-        await fetch(`${API}/api/testing/session/${sessionId}/end`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
-        });
-      } catch (err) {
-        // ignore
-      }
-    }
-  }, [socket, sessionId]);
-
-  // Stop early
-  const handleStop = useCallback(() => {
-    setLogs(prev => [...prev, 'Session stopped by user']);
-    endSession('aborted');
-  }, [endSession]);
-
-  // Dismiss retrain popup
-  const dismissRetrain = () => setRetrainGesture(null);
-
-  // ─── Render ─────────────────────────────────────────────────────────────
-
-  // Setup screen
-  if (phase === 'setup') {
-    if (!gesturesLoaded) {
-      return (
-        <div className="testing-page">
-          <div className="card test-setup-card test-empty-card" />
-        </div>
-      );
-    }
-
-    if (eligibleGestures.length === 0) {
-      return (
-        <div className="testing-page">
-          <div className="card test-setup-card test-empty-card">
-            <div className="train-setup-grid">
-              <div className="train-setup-section">
-                <label className="train-setup-label">Not ready for testing yet!</label>
-                <p className="test-empty-msg">
-                  Each gesture needs at least 15 training reps before it can be tested.<br />
-                  Head over to the Training page to get started.
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div className="testing-page">
-        <div className="card test-setup-card">
-          <div className="train-setup-grid">
-            {/* Number of prompts */}
-            <div className="train-setup-section">
-              <label className="train-setup-label">Please choose the number of prompts:</label>
-              <div className="train-length-options">
-                {[10, 15, 20, 30].map(n => (
-                  <button
-                    key={n}
-                    className={`btn btn-mode ${sessionLength === n ? 'active' : ''}`}
-                    onClick={() => setSessionLength(n)}
-                  >
-                    {n}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <button
-            className="btn btn-start train-start-btn"
-            onClick={handleStart}
-            disabled={!connected || eligibleGestures.length === 0 || !sessionLength}
-          >
-            ▶ Start
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  // Done screen
-  if (phase === 'done') {
-    const total = stats.correct + stats.incorrect + stats.skipped;
-    const accPct = total > 0 ? Math.round((stats.correct / total) * 100) : 0;
-
-    return (
-      <div className="testing-page">
-        <div className="card test-done-card">
-          <h3 className="test-done-title">Session Complete</h3>
-
-          <div className="test-done-stats">
-            <div className="test-done-stat">
-              <span className="test-done-value test-done-correct">{stats.correct}</span>
-              <span className="test-done-label">Correct</span>
-            </div>
-            <div className="test-done-stat">
-              <span className="test-done-value test-done-incorrect">{stats.incorrect}</span>
-              <span className="test-done-label">Incorrect</span>
-            </div>
-            <div className="test-done-stat">
-              <span className="test-done-value test-done-skipped">{stats.skipped}</span>
-              <span className="test-done-label">Skipped</span>
-            </div>
-            <div className="test-done-stat">
-              <span className="test-done-value">{accPct}%</span>
-              <span className="test-done-label">Accuracy</span>
-            </div>
-          </div>
-
-          <button
-            className="btn btn-start test-new-btn"
-            onClick={() => {
-              setPhase('setup');
-              setSessionId(null);
-              setSequence([]);
-              setCurrentIdx(0);
-              setStats({ correct: 0, incorrect: 0, skipped: 0 });
-              setLogs([]);
-            }}
-          >
-            New Session
-          </button>
-        </div>
-
-        {/* Session log */}
-        <div className="card log-card">
-          <h3>Session Log</h3>
-          <div className="log-entries">
-            {logs.map((entry, i) => (
-              <div key={i} className="log-entry">{entry}</div>
-            ))}
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // Active session: prompting / classifying / result
+// ── Sensor status (static text) ───────────────────────────────────────────────
+function SensorStatusBar({ channels }) {
+  const activeCount = useMemo(() => channels.filter(v => v > 0.15).length, [channels]);
+  const quality = activeCount >= GOOD_THRESHOLD ? 'good'
+    : activeCount >= FAIR_THRESHOLD ? 'fair' : 'poor';
+  const col   = { good:'#69ff47', fair:'#ffd740', poor:'#ff4081' }[quality];
+  const label = { good:'Good',    fair:'Fair',    poor:'Poor'    }[quality];
   return (
-    <div className="testing-page">
-      {/* Progress bar */}
-      <div className="train-progress-bar-wrap">
-        <div className="train-progress-bar">
-          <div className="train-progress-fill" style={{ width: `${progressPct}%` }} />
-        </div>
-        <span className="train-progress-text">{currentIdx} / {sequence.length} prompts</span>
-      </div>
-
-      {/* Stats row */}
-      <div className="test-stats-row">
-        <span className="test-stat test-stat-correct">✓ {stats.correct}</span>
-        <span className="test-stat test-stat-incorrect">✗ {stats.incorrect}</span>
-        <span className="test-stat test-stat-skipped">⟶ {stats.skipped}</span>
-        {retryCount > 0 && (
-          <span className="test-stat test-stat-retry">Retry {retryCount}/{MAX_RETRIES}</span>
-        )}
-      </div>
-
-      <div className="testing-grid">
-        {/* Left: Prompt / Result card */}
-        <div className="card test-prompt-card">
-          <div className="training-progress">{currentIdx + 1} / {sequence.length}</div>
-
-          {/* Prompting phase */}
-          {phase === 'prompting' && currentGesture && (
-            <>
-              <div className="test-phase-label">PERFORM THIS GESTURE</div>
-              <div className="training-gesture-name">{currentGesture.name}</div>
-              {GESTURE_IMAGES[currentGesture.name] && (
-                <div className="gesture-image-wrapper gesture-animate">
-                  <img
-                    src={GESTURE_IMAGES[currentGesture.name]}
-                    alt={currentGesture.name}
-                    className="gesture-image"
-                  />
-                </div>
-              )}
-              <div className="test-waiting">Waiting for gesture...</div>
-              <button className="btn test-skip-btn" onClick={handleSkip}>
-                Skip →
-              </button>
-            </>
-          )}
-
-          {/* Result phase */}
-          {phase === 'result' && currentGesture && (
-            <>
-              <div className="test-phase-label">CLASSIFICATION RESULT</div>
-              <div className="test-result-row">
-                <div className="test-result-expected">
-                  <span className="test-result-small-label">Expected</span>
-                  <span className="test-result-gesture">{currentGesture.name}</span>
-                </div>
-                <span className="test-result-arrow">→</span>
-                <div className="test-result-predicted">
-                  <span className="test-result-small-label">Predicted</span>
-                  <span className={`test-result-gesture ${prediction === currentGesture.name ? 'test-match' : 'test-mismatch'}`}>
-                    {prediction || '?'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="test-confirm-label">Is this what you did?</div>
-
-              <div className="test-confirm-buttons">
-                <button className="btn test-correct-btn" onClick={handleCorrect}>
-                  ✓ Correct
-                </button>
-                <button className="btn test-incorrect-btn" onClick={handleIncorrect}>
-                  ✗ Incorrect
-                </button>
-                <button className="btn test-skip-btn" onClick={handleSkip}>
-                  Skip
-                </button>
-              </div>
-
-              {retryCount > 0 && (
-                <div className="test-retry-info">
-                  Attempt {retryCount + 1} of {MAX_RETRIES}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-
-        {/* Right: Log */}
-        <div className="card log-card">
-          <h3>Testing Log</h3>
-          <div className="log-entries">
-            {logs.map((entry, i) => (
-              <div key={i} className="log-entry">{entry}</div>
-            ))}
-            <div ref={logBottomRef} />
-          </div>
-        </div>
-      </div>
-
-      {/* Retrain popup */}
-      {retrainGesture && (
-        <div className="test-retrain-overlay">
-          <div className="card test-retrain-popup">
-            <h3 className="test-retrain-title">Gesture Needs Retraining</h3>
-            <p className="test-retrain-text">
-              <strong>{retrainGesture}</strong> accuracy has dropped below 50%.
-              Consider doing more training reps to improve classification.
-            </p>
-            <div className="test-retrain-actions">
-              <button className="btn test-retrain-dismiss" onClick={dismissRetrain}>
-                Continue Testing
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Stop button */}
-      <button className="btn btn-stop train-stop-btn" onClick={handleStop}>
-        ■ Stop Session
-      </button>
+    <div style={{ display:'flex', alignItems:'center', gap:6,
+      fontSize:'0.78rem', fontFamily:'monospace', color:'#666' }}>
+      <span>Sensor quality:</span>
+      <span style={{ color:col, fontWeight:700 }}>{label}</span>
     </div>
   );
 }
 
-export default TestingPage;
+// ── EMG activation strip ──────────────────────────────────────────────────────
+function EMGStrip({ actHistory }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const c = ref.current; if (!c) return;
+    const ctx = c.getContext('2d');
+    const W = c.width, H = c.height;
+    ctx.fillStyle = '#090910'; ctx.fillRect(0, 0, W, H);
+    // Threshold lines use actual backend T_ON / T_OFF values mapped to canvas
+    const maxAct = 4;
+    const yOn  = H - (T_ON  / maxAct) * H;
+    const yOff = H - (T_OFF / maxAct) * H;
+    ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
+    ctx.strokeStyle = '#ff408133';
+    ctx.beginPath(); ctx.moveTo(0, yOn);  ctx.lineTo(W, yOn);  ctx.stroke();
+    ctx.strokeStyle = '#ffd74033';
+    ctx.beginPath(); ctx.moveTo(0, yOff); ctx.lineTo(W, yOff); ctx.stroke();
+    ctx.setLineDash([]);
+    if (actHistory.length < 2) return;
+    ctx.beginPath(); ctx.lineWidth = 2;
+    actHistory.forEach((v, i) => {
+      const x = (i / (actHistory.length - 1)) * W;
+      const y = H - Math.min(1, v / maxAct) * H;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    const gr = ctx.createLinearGradient(0, 0, W, 0);
+    gr.addColorStop(0, '#5c5cff44'); gr.addColorStop(1, '#00e5ff');
+    ctx.strokeStyle = gr; ctx.stroke();
+    ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
+    const fg = ctx.createLinearGradient(0, 0, 0, H);
+    fg.addColorStop(0, '#00e5ff14'); fg.addColorStop(1, '#00e5ff00');
+    ctx.fillStyle = fg; ctx.fill();
+    ctx.font = '9px monospace';
+    ctx.fillStyle = '#ff408177';
+    ctx.fillText(`T_ON ${T_ON}`,  5, yOn  - 2);
+    ctx.fillStyle = '#ffd74077';
+    ctx.fillText(`T_OFF ${T_OFF}`, 5, yOff - 2);
+  }, [actHistory]);
+  return (
+    <div>
+      <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace',
+        marginBottom:3, letterSpacing:1 }}>EMG ACTIVATION</div>
+      <canvas ref={ref} width={700} height={80}
+        style={{ width:'100%', height:80, borderRadius:6,
+          border:'1px solid #1a1a2e', display:'block' }} />
+    </div>
+  );
+}
+
+// ── Pipe draw helper ──────────────────────────────────────────────────────────
+function drawPipe(ctx, x, y, w, h, col) {
+  if (h <= 0) return;
+  const gr = ctx.createLinearGradient(x, 0, x + w, 0);
+  gr.addColorStop(0,   col + '1a');
+  gr.addColorStop(0.4, col + 'aa');
+  gr.addColorStop(1,   col + '1a');
+  ctx.fillStyle   = gr;
+  ctx.strokeStyle = col + 'cc';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 3); ctx.fill(); ctx.stroke();
+}
+
+// ── Game ──────────────────────────────────────────────────────────────────────
+function FlappyBallGame({
+  activation, activeNow, decision, targetGesture, gestureColor,
+  onPipeResolve, speedMultiplier, paused,
+}) {
+  const canvasRef = useRef(null);
+  const lastDecisionTokenRef = useRef(null);
+
+  const G = useRef({
+    ballY: BALL_GROUND_Y,
+    pipes: [],
+    flash: 0,
+    flashType: 'none',
+    ready: false,
+  });
+
+  const L = useRef({
+    activation, activeNow, decision, speedMultiplier, paused,
+    onPipeResolve, targetGesture, gestureColor,
+  });
+
+  useEffect(() => {
+    L.current.activation      = activation;
+    L.current.activeNow       = activeNow;
+    L.current.decision        = decision;
+    L.current.speedMultiplier = speedMultiplier;
+    L.current.paused          = paused;
+    L.current.onPipeResolve   = onPipeResolve;
+    L.current.targetGesture   = targetGesture;
+    L.current.gestureColor    = gestureColor;
+  });
+
+  function spawnPipe(x) {
+    const minGapTop = MARGIN + BR + 6;
+    const maxGapTop = GH - MARGIN - BR - GAP_H - 6;
+    const gapTop    = minGapTop + Math.random() * (maxGapTop - minGapTop);
+    return {
+      x,
+      gapTop,
+      label: L.current.targetGesture || '?',
+      color: L.current.gestureColor || '#5c5cff',
+      evaluated: false,
+      outcome: null,
+      decisionToken: null,
+      predicted: null,
+      votes: null,
+    };
+  }
+
+  useEffect(() => {
+    const g = G.current;
+    g.ballY = BALL_GROUND_Y;
+    g.pipes = [
+      spawnPipe(BX + PIPE_SPACING),
+      spawnPipe(BX + PIPE_SPACING * 2),
+      spawnPipe(BX + PIPE_SPACING * 3),
+    ];
+    g.ready = true;
+  }, []);
+
+  useEffect(() => {
+    G.current.pipes.forEach(p => {
+      if (!p.outcome) {
+        p.label = targetGesture || '?';
+        p.color = gestureColor || '#5c5cff';
+      }
+    });
+  }, [targetGesture, gestureColor]);
+
+  useEffect(() => {
+    if (!decision || !decision.token) return;
+    if (lastDecisionTokenRef.current === decision.token) return;
+    lastDecisionTokenRef.current = decision.token;
+
+    const pipe = G.current.pipes.find(p => !p.evaluated && !p.outcome);
+    if (!pipe) return;
+
+    pipe.outcome = decision.isCorrect ? 'pass' : 'fail';
+    pipe.predicted = decision.predicted || null;
+    pipe.votes = decision.votes || [];
+    pipe.decisionToken = decision.token;
+  }, [decision]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx    = canvas.getContext('2d');
+    const g      = G.current;
+    let rafId;
+
+    function loop() {
+      if (!g.ready) { rafId = requestAnimationFrame(loop); return; }
+
+      const l = L.current;
+      const spd = BASE_SPEED * (l.speedMultiplier || 1);
+      const nextPipe = g.pipes.find(p => !p.evaluated);
+
+      let targetY = BALL_GROUND_Y;
+      if (nextPipe?.outcome === 'pass') {
+        targetY = gapCenterY(nextPipe.gapTop);
+      } else if (nextPipe?.outcome === 'fail') {
+        targetY = missYForPipe(nextPipe);
+      } else if (l.activeNow || l.activation >= T_ON) {
+        targetY = BALL_HOVER_Y;
+      }
+
+      targetY = clamp(targetY, MARGIN + BR, GH - MARGIN - BR);
+      g.ballY += 0.11 * (targetY - g.ballY);
+      g.ballY = clamp(g.ballY, MARGIN + BR, GH - MARGIN - BR);
+
+      if (!l.paused) {
+        g.pipes.forEach(p => { p.x -= spd; });
+        const last = g.pipes[g.pipes.length - 1];
+        if (!last || last.x <= BX + PIPE_SPACING * 2) {
+          g.pipes.push(spawnPipe((last?.x || BX) + PIPE_SPACING));
+        }
+        g.pipes = g.pipes.filter(p => p.x > -PW - 20);
+
+        g.pipes.forEach(p => {
+          if (!p.evaluated && p.x <= EVAL_X) {
+            p.evaluated = true;
+            const passed = p.outcome === 'pass';
+            g.flash = 30;
+            g.flashType = passed ? 'pass' : 'hit';
+            l.onPipeResolve && l.onPipeResolve({
+              passed,
+              predicted: p.predicted,
+              votes: p.votes || [],
+              decisionToken: p.decisionToken,
+            });
+          }
+        });
+      }
+
+      if (g.flash > 0) g.flash--;
+
+      ctx.fillStyle = '#06060f';
+      ctx.fillRect(0, 0, GW, GH);
+
+      ctx.strokeStyle = '#ffffff07';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < GW; x += 60) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, GH); ctx.stroke();
+      }
+      for (let y = 0; y < GH; y += 50) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(GW, y); ctx.stroke();
+      }
+
+      if (g.flash > 0) {
+        const alpha = (g.flash / 30) * 0.22;
+        ctx.fillStyle = g.flashType === 'pass'
+          ? `rgba(105,255,71,${alpha})`
+          : `rgba(255,64,129,${alpha})`;
+        ctx.fillRect(0, 0, GW, GH);
+      }
+
+      g.pipes.forEach(p => {
+        const col = p.color || '#5c5cff';
+        const gapBot = p.gapTop + GAP_H;
+        drawPipe(ctx, p.x, 0, PW, p.gapTop, col);
+        drawPipe(ctx, p.x, gapBot, PW, GH - gapBot, col);
+        ctx.save();
+        ctx.font = 'bold 11px monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.shadowColor = col;
+        ctx.shadowBlur = 12;
+        ctx.fillStyle = col;
+        ctx.fillText(p.label, p.x + PW / 2, gapCenterY(p.gapTop));
+        ctx.restore();
+      });
+
+      const bc = g.flash > 0 && g.flashType === 'pass' ? '#69ff47'
+        : g.flash > 0 && g.flashType === 'hit' ? '#ff4081'
+        : '#00e5ff';
+      ctx.save();
+      ctx.shadowColor = bc;
+      ctx.shadowBlur = 20;
+      const bg = ctx.createRadialGradient(BX - 4, g.ballY - 4, 2, BX, g.ballY, BR);
+      bg.addColorStop(0, '#ffffff');
+      bg.addColorStop(0.45, bc);
+      bg.addColorStop(1, '#00000055');
+      ctx.beginPath();
+      ctx.arc(BX, g.ballY, BR, 0, Math.PI * 2);
+      ctx.fillStyle = bg;
+      ctx.fill();
+      ctx.restore();
+
+      const barH  = GH - 30;
+      const fillH = Math.min(1, l.activation / 4) * barH;
+      ctx.fillStyle = '#ffffff08';
+      ctx.beginPath();
+      ctx.roundRect(8, 15, 10, barH, 5);
+      ctx.fill();
+      if (fillH > 0) {
+        const bg2 = ctx.createLinearGradient(0, 15 + barH, 0, 15 + barH - fillH);
+        bg2.addColorStop(0, '#00e5ff');
+        bg2.addColorStop(1, '#ff4081');
+        ctx.fillStyle = bg2;
+        ctx.beginPath();
+        ctx.roundRect(8, 15 + barH - fillH, 10, fillH, 4);
+        ctx.fill();
+      }
+      ctx.fillStyle = '#ffffff55';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(l.activation.toFixed(2), 13, GH - 4);
+
+      rafId = requestAnimationFrame(loop);
+    }
+
+    rafId = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafId);
+  }, []);
+
+  return (
+    <canvas ref={canvasRef} width={GW} height={GH}
+      style={{ width:'100%', height:'auto', display:'block',
+        borderRadius:10, border:'1px solid #1e1e35' }} />
+  );
+}
+
+// ── Votes bar ─────────────────────────────────────────────────────────────────
+function VotesPie({ votes }) {
+  if (!votes || !votes.length) return null;
+  const counts = {};
+  votes.forEach(v => { counts[v] = (counts[v] || 0) + 1; });
+  const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const total  = votes.length;
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:4, padding:'10px 14px',
+      background:'#0d0d1a', border:'1px solid #1e1e35', borderRadius:8 }}>
+      <div style={{ fontSize:'0.7rem', color:'#555', fontFamily:'monospace', marginBottom:2 }}>
+        VOTES ({total})
+      </div>
+      {sorted.map(([name, n]) => {
+        const pct = Math.round((n / total) * 100);
+        const col = GESTURE_COLORS[name] || '#555';
+        return (
+          <div key={name} style={{ display:'flex', alignItems:'center', gap:6 }}>
+            <div style={{ width:8, height:8, borderRadius:'50%', background:col, flexShrink:0 }} />
+            <div style={{ flex:1, height:4, background:'#151525', borderRadius:2, overflow:'hidden' }}>
+              <div style={{ width:`${pct}%`, height:'100%', background:col, transition:'width 0.3s' }} />
+            </div>
+            <span style={{ fontSize:'0.68rem', color:'#888', fontFamily:'monospace', minWidth:65 }}>
+              {name.slice(0, 10)} {pct}%
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+export default function TestingPage({ socket, connected, user, onSessionEnd }) {
+
+  const [gestures,      setGestures]      = useState([]);
+  const [mode,          setMode]          = useState('simulated');
+  const [liveOpts,      setLiveOpts]      = useState({ host:'0.0.0.0', port:'45454' });
+  const [focusGestures, setFocusGestures] = useState([]);
+  const [speedMult,     setSpeedMult]     = useState(1.0);
+
+  const [sessionId,      setSessionId]      = useState(null);
+  const [gesturePool,    setGesturePool]    = useState([]);
+  const [currentGesture, setCurrentGesture] = useState(null);
+  const [phase,          setPhase]          = useState('setup');
+  const [retryCount,     setRetryCount]     = useState(0);
+  const [gamePaused,     setGamePaused]     = useState(false);
+
+  const [simIdx,   setSimIdx]   = useState(0);
+  const simIdxRef  = useRef(0);
+
+  const [prediction, setPrediction] = useState(null);
+  const [votes,      setVotes]      = useState([]);
+  const [pendingResult, setPendingResult] = useState(null);
+  const [liveStateLabel, setLiveStateLabel] = useState('REST');
+
+  const [activation, setActivation] = useState(0);
+  const [channels,   setChannels]   = useState(
+    () => Array.from({ length:64 }, (_, i) => i < 57 ? 0.4 + Math.random() * 0.3 : 0.05)
+  );
+  const [actHistory, setActHistory] = useState([]);
+  const [stats, setStats] = useState({ correct:0, incorrect:0, skipped:0, total:0 });
+  const [logs,  setLogs]  = useState([]);
+
+  const simRef      = useRef(null);
+  const simRunning  = useRef(false);  // gates sim ticker independently of phase
+  const curRef      = useRef(null);
+  const poolRef     = useRef([]);
+  const classifyRef = useRef(null);
+
+  useEffect(() => { curRef.current    = currentGesture; }, [currentGesture]);
+  useEffect(() => { poolRef.current   = gesturePool;    }, [gesturePool]);
+  useEffect(() => { simIdxRef.current = simIdx;         }, [simIdx]);
+
+  // ── Fetch eligible gestures ───────────────────────────────────────────────
+  useEffect(() => {
+    if (!user?.id) return;
+    fetch(`${API}/api/testing/gestures/${user.id}`)
+      .then(r => r.json())
+      .then(d => setGestures(d.gestures || []))
+      .catch(() => {});
+  }, [user?.id]);
+
+  // ── Pool helpers ──────────────────────────────────────────────────────────
+  const buildPool = useCallback((gs, focus) => {
+    const pool = [];
+    gs.forEach(g => {
+      const pw = Math.max(1, Math.round((100 - (g.accuracy || 100)) / 10) + 1);
+      const fb = focus.includes(g.name) ? 3 : 1;
+      for (let i = 0; i < pw * fb; i++) pool.push(g);
+    });
+    return pool;
+  }, []);
+
+  const pickFromPool = useCallback((pool) => {
+    const p = pool || poolRef.current;
+    return p.length ? p[Math.floor(Math.random() * p.length)] : null;
+  }, []);
+
+  // ── Advance to next gesture ───────────────────────────────────────────────
+  const advanceToNext = useCallback(() => {
+    setPrediction(null); setVotes([]); setPendingResult(null);
+    setRetryCount(0); setGamePaused(false);
+    if (mode === 'simulated') {
+      const next = (simIdxRef.current + 1) % SIM_GESTURE_ORDER.length;
+      setSimIdx(next); simIdxRef.current = next;
+      setCurrentGesture({ name: SIM_GESTURE_ORDER[next], gestureId: next });
+    } else {
+      setCurrentGesture(pickFromPool(poolRef.current));
+    }
+    setPhase('prompting');
+  }, [mode, pickFromPool]);
+
+  // ── Record trial ──────────────────────────────────────────────────────────
+  const recordTrial = useCallback(async (gesture, pred, isCorrect, isSkipped = false) => {
+    if (!gesture || !sessionId) return;
+    try {
+      await fetch(`${API}/api/testing/trial`, {
+        method:'POST', headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({
+          userId:      user?.id, sessionId,
+          gestureId:   gesture.gestureId,
+          prediction:  pred || 'skipped',
+          groundTruth: gesture.name,
+          wasCorrect:  isCorrect, wasSkipped: isSkipped, retryCount,
+        }),
+      });
+    } catch (_) {}
+  }, [sessionId, user, retryCount]);
+
+  // ── Classification handler ────────────────────────────────────────────────
+  // Classification now feeds the game first. The pipe resolution is what
+  // finally decides whether we advance or show the mismatch popup.
+  const decisionSeqRef = useRef(0);
+  const pendingResultRef = useRef(null);
+  useEffect(() => { pendingResultRef.current = pendingResult; }, [pendingResult]);
+
+  const handleClassification = useCallback((predicted, voteList) => {
+    const gesture = curRef.current;
+    if (!gesture || pendingResultRef.current) return;
+
+    decisionSeqRef.current += 1;
+    setPendingResult({
+      token: decisionSeqRef.current,
+      predicted,
+      votes: voteList || [],
+      isCorrect: predicted === gesture.name,
+    });
+  }, []);
+  classifyRef.current = handleClassification;
+
+  // ── Mismatch overlay actions ──────────────────────────────────────────────
+  const handleCorrect = useCallback(async () => {
+    const g = curRef.current;
+    setStats(prev => ({ ...prev, correct: prev.correct + 1, total: prev.total + 1 }));
+    setLogs(prev  => [...prev.slice(-59), `✓  ${g?.name} (marked)`]);
+    await recordTrial(g, prediction, true, false);
+    advanceToNext();
+  }, [prediction, recordTrial, advanceToNext]);
+
+  const handleIncorrect = useCallback(async () => {
+    const g = curRef.current;
+    setStats(prev => ({ ...prev, incorrect: prev.incorrect + 1, total: prev.total + 1 }));
+    setLogs(prev  => [...prev.slice(-59), `✗  ${g?.name} → ${prediction}`]);
+    await recordTrial(g, prediction, false, false);
+    if (retryCount < MAX_RETRIES - 1) {
+      setRetryCount(p => p + 1);
+      setPrediction(null); setVotes([]); setPendingResult(null);
+      setGamePaused(false); setPhase('prompting');
+    } else {
+      advanceToNext();
+    }
+  }, [prediction, recordTrial, retryCount, advanceToNext]);
+
+  const handleSkip = useCallback(async () => {
+    const g = curRef.current;
+    setStats(prev => ({ ...prev, skipped: prev.skipped + 1, total: prev.total + 1 }));
+    setLogs(prev  => [...prev.slice(-59), `⟶  ${g?.name || ''}`]);
+    await recordTrial(g, null, false, true);
+    advanceToNext();
+  }, [recordTrial, advanceToNext]);
+
+  const onPipeResolve = useCallback(async ({ passed, predicted, votes: pipeVotes }) => {
+    const g = curRef.current;
+    const result = pendingResultRef.current;
+
+    if (result?.isCorrect && passed) {
+      setStats(prev => ({ ...prev, correct: prev.correct + 1, total: prev.total + 1 }));
+      setLogs(prev  => [...prev.slice(-59), `✓  ${g?.name}`]);
+      await recordTrial(g, result.predicted, true, false);
+      advanceToNext();
+      return;
+    }
+
+    setPrediction(result?.predicted || predicted || 'No gesture detected');
+    setVotes(result?.votes?.length ? result.votes : (pipeVotes || []));
+    setPendingResult(null);
+    setGamePaused(true);
+    setPhase('result');
+  }, [recordTrial, advanceToNext]);
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── SIMULATION TICKER ─────────────────────────────────────────────────────
+  // Runs whenever simRunning.current is true.
+  // Does NOT depend on `phase` — survives the mismatch overlay.
+  // ═════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (mode !== 'simulated') return;
+
+    const TICK       = 50;
+    const FPS        = 1000 / TICK;
+    const TICKS_REST = Math.round(1.2 * FPS);
+    const TICKS_HOLD = Math.round(2.0 * FPS);
+
+    let simPhase = 'rest';
+    let timer    = 0;
+    let act      = 0;
+    let fired    = false;
+
+    const iv = setInterval(() => {
+      if (!simRunning.current) return; // paused while not in session
+
+      timer++;
+      const noise = () => (Math.random() - 0.5) * 0.04;
+
+      if (simPhase === 'rest') {
+        act = Math.max(0, act * 0.88 + noise());
+        if (timer > TICKS_REST) { simPhase = 'rising'; timer = 0; fired = false; }
+
+      } else if (simPhase === 'rising') {
+        act = Math.min(3.8, act + 0.14 + noise());
+        if (act >= T_ON && !fired) {
+          fired = true;
+          const idx       = simIdxRef.current;
+          const target    = SIM_GESTURE_ORDER[idx];
+          const correct   = Math.random() < 0.70;
+          const predicted = correct
+            ? target
+            : ALL_GESTURES[Math.floor(Math.random() * ALL_GESTURES.length)];
+          const fv = Array.from({ length:30 }, () =>
+            Math.random() < 0.75
+              ? predicted
+              : ALL_GESTURES[Math.floor(Math.random() * ALL_GESTURES.length)]
+          );
+          setVotes(fv);
+          setLogs(prev => [...prev.slice(-59),
+            `★  ${predicted}${predicted !== target ? `  (expected ${target})` : ''}`]);
+          classifyRef.current(predicted, fv);
+        }
+        if (act >= 3.6) { simPhase = 'hold'; timer = 0; }
+
+      } else if (simPhase === 'hold') {
+        act = Math.max(3.2, Math.min(3.9, act + noise() * 0.25));
+        if (timer > TICKS_HOLD) { simPhase = 'falling'; timer = 0; }
+
+      } else {
+        act = Math.max(0, act - 0.11 + noise());
+        if (act < 0.15) { simPhase = 'rest'; timer = 0; act = 0; }
+      }
+
+      setActivation(act);
+      setActHistory(prev => {
+        const n = [...prev, act];
+        return n.length > 120 ? n.slice(-120) : n;
+      });
+    }, TICK);
+
+    simRef.current = iv;
+    return () => { clearInterval(iv); simRef.current = null; };
+  }, [mode]); // only restarts if mode changes
+
+  // Gate the ticker via simRunning ref based on phase
+  useEffect(() => {
+    simRunning.current = (phase === 'prompting');
+  }, [phase]);
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── LIVE EMG SOCKET HANDLER ────────────────────────────────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!socket || mode !== 'live') return;
+
+    let lastLabel = '';
+
+    const onState = (data) => {
+      const act = typeof data.act === 'number' ? data.act : 0;
+      const label = data.label || '';
+      setLiveStateLabel(label || 'REST');
+      setActivation(act);
+      setActHistory(prev => {
+        const n = [...prev, act];
+        return n.length > 120 ? n.slice(-120) : n;
+      });
+
+      // Detect ACTIVE → REST transition with a real gesture name.
+      // This is the single authoritative classification trigger for live mode.
+      const gesture = data.gesture || '';
+      const isReal  = gesture && gesture !== 'REST' && gesture !== '—' && gesture !== '';
+
+      if (lastLabel === 'ACTIVE' && label === 'REST' && isReal) {
+        classifyRef.current(gesture, null);
+      }
+      lastLabel = label;
+    };
+
+    const onLog = (data) => {
+      if (!data.text) return;
+      // Log for display only — do NOT re-trigger classification here.
+      // The '★  final:' line arrives after onState already fired, causing
+      // a double-call on the already-advanced gesture.
+      setLogs(prev => [...prev.slice(-59), data.text]);
+    };
+
+    // Backend emits { flexors:[{x,y}...], extensors:[{x,y}...] }
+    // Derive synthetic 64-ch array for SensorStatusBar.
+    const onSignal = (data) => {
+      try {
+        const flex = data.flexors  || [];
+        const ext  = data.extensors || [];
+        // Each array has up to 100 points; take the latest value from each
+        const flexVal = flex.length  ? flex[flex.length - 1].y  : 0;
+        const extVal  = ext.length   ? ext[ext.length  - 1].y   : 0;
+        // Fill channels: first 32 = flexors, next 32 = extensors
+        // Scale: the y values are already normalised RMS ratios
+        const ch = Array.from({ length: 64 }, (_, i) =>
+          i < 32 ? flexVal * (0.7 + Math.random() * 0.6)
+                 : extVal  * (0.7 + Math.random() * 0.6)
+        );
+        setChannels(ch);
+      } catch (_) {}
+    };
+
+    socket.on('state',  onState);
+    socket.on('log',    onLog);
+    socket.on('signal', onSignal);
+    return () => {
+      socket.off('state',  onState);
+      socket.off('log',    onLog);
+      socket.off('signal', onSignal);
+    };
+  }, [socket, mode]);
+
+  // ── Start session ─────────────────────────────────────────────────────────
+  const handleStart = useCallback(async () => {
+    const eligibleGs = gestures.filter(g => g.eligible);
+    const firstGesture = mode === 'simulated'
+      ? { name: SIM_GESTURE_ORDER[0], gestureId: 0 }
+      : pickFromPool(buildPool(eligibleGs, focusGestures));
+    if (!firstGesture) return;
+
+    try {
+      let sid = null;
+      try {
+        const r = await fetch(`${API}/api/testing/session`, {
+          method:'POST', headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({ userId: user?.id }),
+        });
+        sid = (await r.json()).sessionId;
+      } catch (_) {}
+
+      if (mode !== 'simulated') {
+        const pool = buildPool(eligibleGs, focusGestures);
+        setGesturePool(pool); poolRef.current = pool;
+      }
+
+      setSessionId(sid);
+      setSimIdx(0); simIdxRef.current = 0;
+      setCurrentGesture(firstGesture);
+      setRetryCount(0);
+      setStats({ correct:0, incorrect:0, skipped:0, total:0 });
+      setLogs(['▶  session started']);
+      setPrediction(null); setVotes([]); setPendingResult(null);
+      setActHistory([]); setActivation(0);
+      setPhase('prompting'); setGamePaused(false);
+
+      if (socket && mode === 'live') socket.emit('start', { mode:'live', liveOpts });
+    } catch (e) {
+      setLogs(prev => [...prev, `Error: ${e.message}`]);
+    }
+  }, [user, mode, liveOpts, gestures, focusGestures, buildPool, pickFromPool, socket]);
+
+  // ── End session ───────────────────────────────────────────────────────────
+  const endSession = useCallback(async (status = 'completed') => {
+    simRunning.current = false;
+    setPhase('done');
+    if (socket) socket.emit('stop');
+    if (simRef.current) { clearInterval(simRef.current); simRef.current = null; }
+    if (sessionId) {
+      try {
+        await fetch(`${API}/api/testing/session/${sessionId}/end`, {
+          method:'POST', headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({ status }),
+        });
+      } catch (_) {}
+    }
+  }, [socket, sessionId]);
+
+  const toggleFocus = (name) =>
+    setFocusGestures(p => p.includes(name) ? p.filter(n => n !== name) : [...p, name]);
+
+  const gColor       = GESTURE_COLORS[currentGesture?.name] || '#5c5cff';
+  const eligibleGs   = gestures.filter(g => g.eligible);
+  const ineligibleGs = gestures.filter(g => !g.eligible);
+  const accLive      = stats.total > 0 ? Math.round(stats.correct / stats.total * 100) : null;
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── SETUP ─────────────────────────────────────────────────────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  if (phase === 'setup') return (
+    <div className="testing-page" style={{ maxWidth:820, margin:'0 auto', padding:'0 0 40px' }}>
+      <div className="card test-setup-card">
+        <h3 className="dashboard-card-title">Test Session Setup</h3>
+        <div className="train-setup-grid">
+
+          <div className="train-setup-section" style={{ gridColumn:'1 / -1' }}>
+            <label className="train-setup-label">
+              {mode === 'simulated'
+                ? `Simulation gesture order (${SIM_GESTURE_ORDER.length} gestures, fixed)`
+                : 'Eligible Gestures — click to focus (★ = 3× more frequent)'}
+            </label>
+            {mode === 'simulated' ? (
+              <div style={{ display:'flex', flexWrap:'wrap', gap:5, marginTop:6 }}>
+                {SIM_GESTURE_ORDER.map((name, i) => (
+                  <div key={i} style={{
+                    background:'#0d0d1a',
+                    border:`1px solid ${GESTURE_COLORS[name] || '#333'}44`,
+                    borderRadius:5, padding:'2px 9px',
+                    fontSize:'0.7rem', fontFamily:'monospace',
+                    color: GESTURE_COLORS[name] || '#888',
+                  }}>{i + 1}. {name}</div>
+                ))}
+              </div>
+            ) : (
+              <>
+                <div className="train-gesture-chips">
+                  {eligibleGs.length === 0 && (
+                    <span className="train-no-gestures">No eligible gestures (need ≥15 reps)</span>
+                  )}
+                  {eligibleGs.map(g => {
+                    const focused = focusGestures.includes(g.name);
+                    const col = GESTURE_COLORS[g.name] || '#5c5cff';
+                    return (
+                      <div key={g.gestureId} className="train-gesture-chip"
+                        onClick={() => toggleFocus(g.name)}
+                        style={{ cursor:'pointer',
+                          border: focused ? `2px solid ${col}` : '2px solid transparent',
+                          boxShadow: focused ? `0 0 8px ${col}44` : 'none',
+                          transition:'all 0.15s' }}>
+                        {focused && <span style={{ color:col, marginRight:4 }}>★</span>}
+                        <span>{g.name}</span>
+                        <span className="test-chip-acc">{g.accuracy}%</span>
+                      </div>
+                    );
+                  })}
+                </div>
+                {ineligibleGs.length > 0 && (
+                  <div className="test-ineligible" style={{ marginTop:10 }}>
+                    <label className="train-setup-label"
+                      style={{ fontSize:'0.72rem', color:'#999' }}>Not yet eligible</label>
+                    <div className="train-gesture-chips">
+                      {ineligibleGs.map(g => (
+                        <div key={g.gestureId} className="train-gesture-chip test-chip-disabled">
+                          <span>{g.name}</span>
+                          <span className="test-chip-reps">{g.totalTrained}/15</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="train-setup-section">
+            <label className="train-setup-label">Game Speed</label>
+            <div className="train-length-options">
+              {[['Slow',0.6],['Normal',1.0],['Fast',1.4]].map(([l, v]) => (
+                <button key={l} className={`btn btn-mode ${speedMult===v?'active':''}`}
+                  onClick={() => setSpeedMult(v)}>{l}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="train-setup-section">
+            <label className="train-setup-label">Data Source</label>
+            <div className="mode-toggle">
+              <button className={`btn btn-mode ${mode==='simulated'?'active':''}`}
+                onClick={() => setMode('simulated')}>Simulated</button>
+              <button className={`btn btn-mode ${mode==='live'?'active':''}`}
+                onClick={() => setMode('live')}>Live EMG</button>
+            </div>
+            {mode === 'live' && (
+              <div className="live-opts" style={{ marginTop:10 }}>
+                <label>IP
+                  <input type="text" value={liveOpts.host}
+                    onChange={e => setLiveOpts(o => ({ ...o, host:e.target.value }))} />
+                </label>
+                <label>Port
+                  <input type="number" value={liveOpts.port}
+                    onChange={e => setLiveOpts(o => ({ ...o, port:e.target.value }))} />
+                </label>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="train-instructions">
+          <p>
+            {mode === 'simulated'
+              ? 'Simulation cycles through the gesture order automatically. The activation bar shows signal level, while the ball only lifts on activation and then locks to a pass or miss lane.'
+              : 'Hold each prompted gesture — the activation bar shows EMG level, the ball lifts when you activate, and it aligns with the gap only when the classified gesture is correct. Session runs until you click End Session.'}
+          </p>
+        </div>
+
+        <button className="btn btn-start train-start-btn" onClick={handleStart}
+          disabled={mode==='live' && (!connected || eligibleGs.length===0)}>
+          ▶ Start {mode === 'simulated' ? 'Simulation' : 'Testing'}
+        </button>
+      </div>
+    </div>
+  );
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── DONE ──────────────────────────────────────────────────────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  if (phase === 'done') {
+    const acc = stats.total > 0 ? Math.round(stats.correct / stats.total * 100) : 0;
+    return (
+      <div className="testing-page" style={{ maxWidth:700, margin:'0 auto' }}>
+        <div className="card test-done-card">
+          <h3 className="test-done-title">Session Complete</h3>
+          <div className="test-done-stats">
+            {[
+              ['Correct',   stats.correct,   'test-done-correct'],
+              ['Incorrect', stats.incorrect, 'test-done-incorrect'],
+              ['Skipped',   stats.skipped,   'test-done-skipped'],
+              ['Accuracy',  `${acc}%`,        ''],
+            ].map(([l, v, c]) => (
+              <div key={l} className="test-done-stat">
+                <span className={`test-done-value ${c}`}>{v}</span>
+                <span className="test-done-label">{l}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ display:'flex', gap:10, justifyContent:'center', marginTop:18 }}>
+            <button className="btn btn-start test-new-btn" onClick={() => {
+              setPhase('setup'); setSessionId(null); setCurrentGesture(null);
+              setStats({ correct:0, incorrect:0, skipped:0, total:0 }); setLogs([]);
+            }}>New Session</button>
+            {onSessionEnd &&
+              <button className="btn btn-stop" onClick={onSessionEnd}>Log Out</button>}
+          </div>
+        </div>
+        <div className="card log-card" style={{ marginTop:16 }}>
+          <h3>Session Log</h3>
+          <div className="log-entries">
+            {logs.map((e, i) => <div key={i} className="log-entry">{e}</div>)}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── ACTIVE SESSION ────────────────────────────────────────────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  return (
+    <div className="testing-page" style={{ position:'relative', maxWidth:900, margin:'0 auto' }}>
+
+      {/* Header */}
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
+        marginBottom:10, gap:12, flexWrap:'wrap' }}>
+        <div style={{ display:'flex', gap:14, alignItems:'center',
+          fontFamily:'monospace', fontSize:'0.8rem' }}>
+          <span style={{ color:'#69ff47' }}>✓ {stats.correct}</span>
+          <span style={{ color:'#ff4081' }}>✗ {stats.incorrect}</span>
+          <span style={{ color:'#888' }}>⟶ {stats.skipped}</span>
+          {accLive !== null && <span style={{ color:'#aaa' }}>acc {accLive}%</span>}
+          {mode === 'simulated' && (
+            <span style={{ color:'#555', fontSize:'0.7rem' }}>
+              #{simIdx + 1}/{SIM_GESTURE_ORDER.length}
+            </span>
+          )}
+        </div>
+        <SensorStatusBar channels={channels} />
+        <button className="btn btn-stop" style={{ flexShrink:0 }}
+          onClick={() => endSession('aborted')}>■ End Session</button>
+      </div>
+
+      {/* Gesture prompt */}
+      {currentGesture && (
+        <div style={{ display:'flex', alignItems:'center', gap:14,
+          background:'#0d0d1a', border:`1px solid ${gColor}44`,
+          borderRadius:10, padding:'10px 18px', marginBottom:10,
+          boxShadow:`0 0 20px ${gColor}12` }}>
+          {GESTURE_IMAGES[currentGesture.name] && (
+            <img src={GESTURE_IMAGES[currentGesture.name]} alt={currentGesture.name}
+              style={{ width:52, height:52, objectFit:'cover', borderRadius:8,
+                border:`2px solid ${gColor}55` }} />
+          )}
+          <div>
+            <div style={{ fontSize:'0.68rem', color:'#888', fontFamily:'monospace', letterSpacing:1 }}>
+              {mode === 'simulated' ? 'PROMPT' : 'PERFORM THIS GESTURE'} {/* change prompt back to simulating */}
+            </div>
+            <div style={{ fontSize:'1.5rem', fontWeight:800, color:gColor,
+              fontFamily:'monospace', letterSpacing:2, textShadow:`0 0 14px ${gColor}` }}>
+              {currentGesture.name.toUpperCase()}
+            </div>
+          </div>
+          {retryCount > 0 && (
+            <div style={{ marginLeft:'auto', background:'#1a1020',
+              border:'1px solid #ffd74055', borderRadius:6,
+              padding:'4px 10px', fontSize:'0.76rem', color:'#ffd740', fontFamily:'monospace' }}>
+              Retry {retryCount}/{MAX_RETRIES}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Game */}
+      <div style={{ position:'relative' }}>
+        <FlappyBallGame
+          activation={activation}
+          activeNow={mode === 'live' ? liveStateLabel === 'ACTIVE' : activation >= T_ON}
+          decision={pendingResult}
+          targetGesture={currentGesture?.name}
+          gestureColor={gColor}
+          onPipeResolve={onPipeResolve}
+          speedMultiplier={speedMult}
+          paused={gamePaused}
+        />
+
+        {/* Mismatch overlay */}
+        {phase === 'result' && (
+          <div style={{ position:'absolute', inset:0, background:'#000000cc',
+            borderRadius:10, display:'flex', alignItems:'center', justifyContent:'center' }}>
+            <div style={{ background:'#0f0f1e', border:'1px solid #1e1e35',
+              borderRadius:14, padding:'28px 36px', textAlign:'center',
+              maxWidth:420, width:'90%', boxShadow:'0 0 60px #000' }}>
+              <div style={{ fontSize:'0.7rem', color:'#555', fontFamily:'monospace',
+                letterSpacing:2, marginBottom:12 }}>CLASSIFICATION RESULT</div>
+              <div style={{ display:'flex', alignItems:'center', justifyContent:'center',
+                gap:16, marginBottom:16 }}>
+                <div>
+                  <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace' }}>EXPECTED</div>
+                  <div style={{ fontSize:'1.3rem', fontWeight:800, color:'#aaa', fontFamily:'monospace' }}>
+                    {currentGesture?.name}
+                  </div>
+                </div>
+                <div style={{ fontSize:'1.5rem', color:'#555' }}>→</div>
+                <div>
+                  <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace' }}>PREDICTED</div>
+                  <div style={{ fontSize:'1.3rem', fontWeight:800, fontFamily:'monospace',
+                    color:'#ff4081', textShadow:'0 0 10px #ff4081' }}>
+                    {prediction || '?'}
+                  </div>
+                </div>
+              </div>
+              {votes.length > 0 && <div style={{ marginBottom:16 }}><VotesPie votes={votes} /></div>}
+              <div style={{ fontSize:'0.8rem', color:'#888', marginBottom:14 }}>
+                Is this what you did?
+              </div>
+              <div style={{ display:'flex', gap:8, justifyContent:'center' }}>
+                <button className="btn test-correct-btn" onClick={handleCorrect}>✓ Yes</button>
+                <button className="btn test-incorrect-btn" onClick={handleIncorrect}>✗ No</button>
+                <button className="btn test-skip-btn" onClick={handleSkip}>Skip</button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* EMG strip */}
+      <div style={{ marginTop:10 }}>
+        <EMGStrip actHistory={actHistory} />
+      </div>
+
+      {/* Log */}
+      <div className="card log-card" style={{ marginTop:10, maxHeight:110, overflowY:'auto' }}>
+        <div className="log-entries">
+          {logs.map((e, i) => <div key={i} className="log-entry">{e}</div>)}
+        </div>
+      </div>
+
+      {/* Skip */}
+      {phase !== 'result' && (
+        <button className="btn test-skip-btn" onClick={handleSkip}
+          style={{ position:'fixed', bottom:28, right:28,
+            boxShadow:'0 4px 20px #0008', zIndex:100, opacity:0.85 }}>
+          Skip →
+        </button>
+      )}
+    </div>
+  );
+}

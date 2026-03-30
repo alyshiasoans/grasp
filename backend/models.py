@@ -23,7 +23,7 @@ class User(db.Model):
     # relationships
     user_gestures = db.relationship("UserGesture", back_populates="user", cascade="all, delete-orphan")
     sessions = db.relationship("Session", back_populates="user", cascade="all, delete-orphan")
-    gesture_trials = db.relationship("GestureTrial", back_populates="user", cascade="all, delete-orphan")
+    testing_trials = db.relationship("TestingTrial", back_populates="user", cascade="all, delete-orphan")
     model_versions = db.relationship("ModelVersion", back_populates="user", cascade="all, delete-orphan")
     training_files = db.relationship("TrainingFile", back_populates="user", cascade="all, delete-orphan")
 
@@ -36,8 +36,8 @@ class Gesture(db.Model):
     gesture_image = db.Column(db.String(300))  # path or URL to image/animation
 
     user_gestures = db.relationship("UserGesture", back_populates="gesture")
-    session_gestures = db.relationship("SessionGesture", back_populates="gesture")
-    gesture_trials = db.relationship("GestureTrial", back_populates="gesture")
+    training_gestures = db.relationship("TrainingGesture", back_populates="gesture")
+    testing_trials = db.relationship("TestingTrial", back_populates="gesture")
 
 
 class UserGesture(db.Model):
@@ -80,37 +80,33 @@ class Session(db.Model):
     number_of_connected_channels = db.Column(db.Integer)
 
     user = db.relationship("User", back_populates="sessions")
-    session_gestures = db.relationship("SessionGesture", back_populates="session", cascade="all, delete-orphan")
-    gesture_trials = db.relationship("GestureTrial", back_populates="session", cascade="all, delete-orphan")
+    training_gestures = db.relationship("TrainingGesture", back_populates="session", cascade="all, delete-orphan")
+    testing_trials = db.relationship("TestingTrial", back_populates="session", cascade="all, delete-orphan")
     training_files = db.relationship("TrainingFile", back_populates="session", cascade="all, delete-orphan")
 
 
-class SessionGesture(db.Model):
-    __tablename__ = "session_gestures"
+class TrainingGesture(db.Model):
+    __tablename__ = "training_gestures"
 
     id = db.Column(db.Integer, primary_key=True)
     session_id = db.Column(db.Integer, db.ForeignKey("sessions.id"), nullable=False)
     gesture_id = db.Column(db.Integer, db.ForeignKey("gestures.id"), nullable=False)
     display_order = db.Column(db.Integer, nullable=False)
-    target_repetitions = db.Column(db.Integer, default=1, nullable=False)
-    completed_repetitions = db.Column(db.Integer, default=0, nullable=False)
-    was_skipped = db.Column(db.Boolean, default=False, nullable=False)
+    completed = db.Column(db.Boolean, default=True, nullable=False)
 
-    session = db.relationship("Session", back_populates="session_gestures")
-    gesture = db.relationship("Gesture", back_populates="session_gestures")
-    gesture_trials = db.relationship("GestureTrial", back_populates="session_gesture", cascade="all, delete-orphan")
+    session = db.relationship("Session", back_populates="training_gestures")
+    gesture = db.relationship("Gesture", back_populates="training_gestures")
 
 
-class GestureTrial(db.Model):
-    __tablename__ = "gesture_trials"
+class TestingTrial(db.Model):
+    __tablename__ = "testing_trials"
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     session_id = db.Column(db.Integer, db.ForeignKey("sessions.id"), nullable=False)
-    session_gesture_id = db.Column(db.Integer, db.ForeignKey("session_gestures.id"), nullable=False)
     gesture_id = db.Column(db.Integer, db.ForeignKey("gestures.id"), nullable=False)
+    display_order = db.Column(db.Integer, nullable=False)
     trial_number = db.Column(db.Integer, nullable=False)
-    attempt_type = db.Column(db.String(20), nullable=False)  # training | testing | retraining
     ground_truth = db.Column(db.String(100))
     prediction = db.Column(db.String(100))
     confidence = db.Column(db.Float)
@@ -118,10 +114,9 @@ class GestureTrial(db.Model):
     was_correct = db.Column(db.Boolean)
     was_skipped = db.Column(db.Boolean, default=False, nullable=False)
 
-    user = db.relationship("User", back_populates="gesture_trials")
-    session = db.relationship("Session", back_populates="gesture_trials")
-    session_gesture = db.relationship("SessionGesture", back_populates="gesture_trials")
-    gesture = db.relationship("Gesture", back_populates="gesture_trials")
+    user = db.relationship("User", back_populates="testing_trials")
+    session = db.relationship("Session", back_populates="testing_trials")
+    gesture = db.relationship("Gesture", back_populates="testing_trials")
 
 
 class ModelVersion(db.Model):
