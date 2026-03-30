@@ -36,6 +36,12 @@ GESTURE_CLASSES = {
     0: "Open", 1: "Close", 2: "Thumbs Up", 3: "Peace",
     4: "Index Point", 5: "Four", 6: "Okay", 7: "Spiderman",
 }
+
+# Progression order for unlocking gestures (first two start unlocked)
+UNLOCK_ORDER = ["Open", "Close", "Thumbs Up", "Peace",
+                "Index Point", "Four", "Okay", "Spiderman"]
+AUTO_UNLOCK_ACCURACY = 70   # avg accuracy on unlocked gestures to unlock next
+AUTO_UNLOCK_MIN_TESTS = 5   # minimum test trials per unlocked gesture
 GESTURE_COLORS = {
     "Open": "#00e5ff", "Close": "#ff4081", "Thumbs Up": "#69ff47",
     "Peace": "#ffd740", "Index Point": "#e040fb", "Four": "#ff6d00",
@@ -636,6 +642,37 @@ def testing_sequence(user_id):
         return jsonify({"error": "No eligible gestures (need ≥15 training reps each)"}), 400
     return jsonify({"sequence": random.choices(eligible, weights=weights, k=count)})
 
+# ── Auto-unlock helper ────────────────────────────────────────────────────────
+def _check_auto_unlock(user_id):
+    """Unlock the next gesture if all currently-unlocked gestures have
+    avg accuracy >= AUTO_UNLOCK_ACCURACY and each has >= AUTO_UNLOCK_MIN_TESTS trials."""
+    ugs = UserGesture.query.filter_by(user_id=user_id).all()
+    ug_by_name = {}
+    for ug in ugs:
+        g = db.session.get(Gesture, ug.gesture_id)
+        if g: ug_by_name[g.gesture_name] = ug
+
+    unlocked = [ug_by_name[n] for n in UNLOCK_ORDER if n in ug_by_name and ug_by_name[n].is_unlocked]
+    if not unlocked:
+        return None
+
+    # Check all unlocked gestures meet thresholds
+    for ug in unlocked:
+        total = ug.correct_predictions + ug.incorrect_predictions
+        if total < AUTO_UNLOCK_MIN_TESTS:
+            return None
+        if ug.accuracy < AUTO_UNLOCK_ACCURACY:
+            return None
+
+    # Find next locked gesture in order
+    for name in UNLOCK_ORDER:
+        ug = ug_by_name.get(name)
+        if ug and not ug.is_unlocked:
+            ug.is_unlocked = True
+            db.session.commit()
+            return name
+    return None
+
 @app.route("/api/testing/session", methods=["POST"])
 def create_test_session():
     data    = request.get_json(silent=True) or {}
@@ -682,7 +719,14 @@ def record_test_trial():
         if ug.accuracy < 50 and total >= 5: ug.needs_retraining = True
 
     db.session.commit()
-    return jsonify({"trialId": trial.id, "accuracy": ug.accuracy if ug else None})
+
+    # ── Auto-unlock check ────────────────────────────────────────────────
+    newly_unlocked = None
+    if user_id:
+        newly_unlocked = _check_auto_unlock(user_id)
+
+    return jsonify({"trialId": trial.id, "accuracy": ug.accuracy if ug else None,
+                    "newlyUnlocked": newly_unlocked})
 
 @app.route("/api/testing/session/<int:session_id>/end", methods=["POST"])
 def end_test_session(session_id):
@@ -738,6 +782,34 @@ def admin_users():
     users = User.query.filter_by(is_admin=False).order_by(User.first_name, User.last_name).all()
     return jsonify([{"id": u.id, "firstName": u.first_name, "lastName": u.last_name,
                      "username": u.username} for u in users])
+
+@app.route("/api/admin/gestures/<int:user_id>")
+def admin_gestures(user_id):
+    user = db.session.get(User, user_id)
+    if not user: return jsonify({"error": "User not found"}), 404
+    result = []
+    for ug in user.user_gestures:
+        g = db.session.get(Gesture, ug.gesture_id)
+        result.append({
+            "gestureId": g.id, "name": g.gesture_name,
+            "isUnlocked": ug.is_unlocked, "isEnabled": ug.is_enabled,
+            "accuracy": round(ug.accuracy, 1),
+            "totalTrained": ug.total_times_trained,
+            "totalTested": ug.total_times_tested,
+        })
+    return jsonify(result)
+
+@app.route("/api/admin/gestures/<int:user_id>/unlock", methods=["POST"])
+def admin_toggle_unlock(user_id):
+    data = request.get_json(silent=True) or {}
+    gesture_id = data.get("gestureId")
+    unlock = data.get("unlock", True)
+    if gesture_id is None: return jsonify({"error": "gestureId required"}), 400
+    ug = UserGesture.query.filter_by(user_id=user_id, gesture_id=gesture_id).first()
+    if not ug: return jsonify({"error": "UserGesture not found"}), 404
+    ug.is_unlocked = bool(unlock)
+    db.session.commit()
+    return jsonify({"ok": True, "gestureId": gesture_id, "isUnlocked": ug.is_unlocked})
 
 @app.route("/api/admin/training-files/<int:user_id>")
 def admin_training_files(user_id):

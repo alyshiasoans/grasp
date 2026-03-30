@@ -403,11 +403,9 @@ function VotesPie({ votes }) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-export default function TestingPage({ socket, connected, user, onSessionEnd }) {
+export default function TestingPage({ socket, connected, user, onSessionEnd, mode = 'simulated', liveOpts = { host:'0.0.0.0', port:'45454' } }) {
 
   const [gestures,      setGestures]      = useState([]);
-  const [mode,          setMode]          = useState('simulated');
-  const [liveOpts,      setLiveOpts]      = useState({ host:'0.0.0.0', port:'45454' });
   const [focusGestures, setFocusGestures] = useState([]);
   const [speedMult,     setSpeedMult]     = useState(1.0);
 
@@ -853,27 +851,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd }) {
             </div>
           </div>
 
-          <div className="train-setup-section">
-            <label className="train-setup-label">Data Source</label>
-            <div className="mode-toggle">
-              <button className={`btn btn-mode ${mode==='simulated'?'active':''}`}
-                onClick={() => setMode('simulated')}>Simulated</button>
-              <button className={`btn btn-mode ${mode==='live'?'active':''}`}
-                onClick={() => setMode('live')}>Live EMG</button>
-            </div>
-            {mode === 'live' && (
-              <div className="live-opts" style={{ marginTop:10 }}>
-                <label>IP
-                  <input type="text" value={liveOpts.host}
-                    onChange={e => setLiveOpts(o => ({ ...o, host:e.target.value }))} />
-                </label>
-                <label>Port
-                  <input type="number" value={liveOpts.port}
-                    onChange={e => setLiveOpts(o => ({ ...o, port:e.target.value }))} />
-                </label>
-              </div>
-            )}
-          </div>
+
         </div>
 
         <div className="train-instructions">
@@ -886,7 +864,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd }) {
 
         <button className="btn btn-start train-start-btn" onClick={handleStart}
           disabled={mode==='live' && (!connected || eligibleGs.length===0)}>
-          ▶ Start {mode === 'simulated' ? 'Simulation' : 'Testing'}
+          ▶ Start
         </button>
       </div>
     </div>

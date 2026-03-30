@@ -12,6 +12,7 @@ function AdminDashboard({ user }) {
   const [selectedFileIds, setSelectedFileIds] = useState([]);
   const [training, setTraining] = useState(false);
   const [trainLogs, setTrainLogs] = useState([]);
+  const [gestureUnlocks, setGestureUnlocks] = useState([]);
 
   // Load all users on mount
   useEffect(() => {
@@ -23,17 +24,19 @@ function AdminDashboard({ user }) {
 
   // Load selected user's progress + training files + models
   useEffect(() => {
-    if (!selectedUserId) { setProgress(null); setTrainingFiles([]); setModels([]); setSelectedFileIds([]); setTrainLogs([]); return; }
+    if (!selectedUserId) { setProgress(null); setTrainingFiles([]); setModels([]); setSelectedFileIds([]); setTrainLogs([]); setGestureUnlocks([]); return; }
     setLoading(true);
     Promise.all([
       fetch(`${API}/api/dashboard/${selectedUserId}`).then((r) => r.json()),
       fetch(`${API}/api/admin/training-files/${selectedUserId}`).then((r) => r.json()),
       fetch(`${API}/api/admin/models/${selectedUserId}`).then((r) => r.json()),
+      fetch(`${API}/api/admin/gestures/${selectedUserId}`).then((r) => r.json()),
     ])
-      .then(([dashData, filesData, modelsData]) => {
+      .then(([dashData, filesData, modelsData, gesturesData]) => {
         setProgress(dashData);
         setTrainingFiles(filesData);
         setModels(modelsData);
+        setGestureUnlocks(gesturesData);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -98,6 +101,23 @@ function AdminDashboard({ user }) {
 
   const selectedUser = users.find((u) => u.id === Number(selectedUserId));
 
+  const handleToggleUnlock = (gestureId, currentlyUnlocked) => {
+    fetch(`${API}/api/admin/gestures/${selectedUserId}/unlock`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ gestureId, unlock: !currentlyUnlocked }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.ok) {
+          setGestureUnlocks((prev) =>
+            prev.map((g) => g.gestureId === gestureId ? { ...g, isUnlocked: data.isUnlocked } : g)
+          );
+        }
+      })
+      .catch(() => {});
+  };
+
   return (
     <div className="dashboard-page">
       <div className="card dash-welcome-card">
@@ -159,6 +179,55 @@ function AdminDashboard({ user }) {
                     <td>{g.totalTested}</td>
                     <td>{g.accuracy}%</td>
                     <td>{g.avgConfidence}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Gesture unlock management */}
+          <div className="card admin-table-card">
+            <h3 className="admin-table-title">Gesture Access</h3>
+            <p style={{ color: '#999', fontSize: '0.82rem', marginBottom: '12px' }}>
+              Gestures auto-unlock when all unlocked gestures reach {'>'}70% accuracy with {'>'}5 test trials each. You can also toggle manually.
+            </p>
+            <table className="admin-gesture-table">
+              <thead>
+                <tr>
+                  <th>Gesture</th>
+                  <th>Accuracy</th>
+                  <th>Trained</th>
+                  <th>Tested</th>
+                  <th style={{ textAlign: 'center' }}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {gestureUnlocks.map((g) => (
+                  <tr key={g.gestureId}>
+                    <td>{g.name}</td>
+                    <td>{g.accuracy}%</td>
+                    <td>{g.totalTrained}</td>
+                    <td>{g.totalTested}</td>
+                    <td style={{ textAlign: 'center' }}>
+                      {g.isUnlocked ? (
+                        <button
+                          className="admin-status-active"
+                          style={{ cursor: 'pointer', border: 'none', background: 'none' }}
+                          onClick={() => handleToggleUnlock(g.gestureId, true)}
+                          title="Click to lock"
+                        >
+                          Unlocked
+                        </button>
+                      ) : (
+                        <button
+                          className="admin-status-inactive"
+                          onClick={() => handleToggleUnlock(g.gestureId, false)}
+                          title="Click to unlock"
+                        >
+                          Locked
+                        </button>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
