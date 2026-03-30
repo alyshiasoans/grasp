@@ -160,22 +160,386 @@ function EMGStrip({ actHistory, tOn, tOff }) {
 }
 
 // ── Pipe draw helper ──────────────────────────────────────────────────────────
-function drawPipe(ctx, x, y, w, h, col) {
+function drawPipeSimple(ctx, x, y, w, h, fillCol, strokeCol) {
   if (h <= 0) return;
-  const gr = ctx.createLinearGradient(x, 0, x + w, 0);
-  gr.addColorStop(0,   col + '1a');
-  gr.addColorStop(0.4, col + 'aa');
-  gr.addColorStop(1,   col + '1a');
-  ctx.fillStyle   = gr;
-  ctx.strokeStyle = col + 'cc';
-  ctx.lineWidth   = 1.5;
-  ctx.beginPath(); ctx.roundRect(x, y, w, h, 3); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = fillCol;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 4); ctx.fill();
+  ctx.strokeStyle = strokeCol; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 4); ctx.stroke();
 }
+
+function drawPipeWood(ctx, x, y, w, h) {
+  if (h <= 0) return;
+  ctx.fillStyle = '#6b4226';
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 3); ctx.fill();
+  ctx.strokeStyle = '#5a371f'; ctx.lineWidth = 1;
+  for (let sy = y + 14; sy < y + h; sy += 14) {
+    ctx.beginPath(); ctx.moveTo(x + 2, sy); ctx.lineTo(x + w - 2, sy); ctx.stroke();
+  }
+  ctx.strokeStyle = '#8b6340'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 3); ctx.stroke();
+  const capH = 8, capY = (y === 0) ? y + h - capH : y;
+  ctx.fillStyle = '#7a5030';
+  ctx.fillRect(x - 4, capY, w + 8, capH);
+  ctx.strokeStyle = '#5a371f';
+  ctx.strokeRect(x - 4, capY, w + 8, capH);
+}
+
+// ── THEME DEFINITIONS ─────────────────────────────────────────────────────────
+const GAME_THEMES = {
+  outdoor: {
+    name: 'Outdoor', emoji: '🌿',
+    border: '#8aaa7a',
+    drawBg(ctx, g) {
+      const sky = ctx.createLinearGradient(0, 0, 0, GH);
+      sky.addColorStop(0, '#87CEEB'); sky.addColorStop(0.55, '#b4ddf0');
+      sky.addColorStop(0.75, '#d4e8c2'); sky.addColorStop(1, '#5a8f3c');
+      ctx.fillStyle = sky; ctx.fillRect(0, 0, GW, GH);
+      // Clouds
+      g.clouds.forEach(c => {
+        c.x -= c.speed;
+        if (c.x + c.w < -20) { c.x = GW + 20; c.y = 15 + Math.random() * 80; }
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
+        ctx.beginPath(); ctx.ellipse(c.x, c.y, c.w / 2, 14, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(c.x - c.w * 0.22, c.y + 4, c.w * 0.3, 10, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(c.x + c.w * 0.25, c.y + 3, c.w * 0.25, 11, 0, 0, Math.PI * 2); ctx.fill();
+      });
+      // Grass
+      const gt = GH - 40;
+      ctx.fillStyle = '#4a8c2a'; ctx.fillRect(0, gt, GW, 40);
+      ctx.fillStyle = '#3d7522'; ctx.fillRect(0, gt, GW, 3);
+      ctx.strokeStyle = '#5ea03a'; ctx.lineWidth = 1.5;
+      for (let gx = 0; gx < GW; gx += 8) {
+        ctx.beginPath(); ctx.moveTo(gx, gt); ctx.lineTo(gx + 2, gt - 5 - Math.sin(gx * 0.7) * 3); ctx.stroke();
+      }
+    },
+    drawPipe(ctx, x, y, w, h) { drawPipeWood(ctx, x, y, w, h); },
+    pipeLabel: '#5a371f',
+    drawChar(ctx, x, y, flash, flashType) {
+      // Bird
+      const col = flash > 0 && flashType === 'pass' ? '#7cc440'
+        : flash > 0 && flashType === 'hit' ? '#d45050' : '#f0a030';
+      const darker = flash > 0 && flashType === 'pass' ? '#5a9a30'
+        : flash > 0 && flashType === 'hit' ? '#a03030' : '#c08020';
+      // Body
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.ellipse(x, y, BR + 2, BR - 1, 0, 0, Math.PI * 2); ctx.fill();
+      // Belly
+      ctx.fillStyle = '#ffe8a0';
+      ctx.beginPath(); ctx.ellipse(x + 2, y + 3, BR - 4, BR - 5, 0, 0, Math.PI * 2); ctx.fill();
+      // Wing
+      ctx.fillStyle = darker;
+      ctx.beginPath(); ctx.ellipse(x - 4, y - 2, 7, 4, -0.3, 0, Math.PI * 2); ctx.fill();
+      // Eye
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(x + 6, y - 3, 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(x + 7, y - 3, 1.8, 0, Math.PI * 2); ctx.fill();
+      // Beak
+      ctx.fillStyle = '#e06020';
+      ctx.beginPath(); ctx.moveTo(x + 12, y - 1); ctx.lineTo(x + 18, y + 1); ctx.lineTo(x + 12, y + 3); ctx.closePath(); ctx.fill();
+    },
+    barFill: '#5a9e30', barTrack: 'rgba(0,0,0,0.15)', barText: 'rgba(0,0,0,0.4)',
+    flashPass: 'rgba(100,180,60,', flashFail: 'rgba(180,60,60,',
+  },
+
+  space: {
+    name: 'Space', emoji: '🚀',
+    border: '#2a2a55',
+    drawBg(ctx, g) {
+      ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, GW, GH);
+      // Stars
+      if (!g._stars) {
+        g._stars = Array.from({ length: 80 }, () => ({
+          x: Math.random() * GW, y: Math.random() * GH,
+          r: 0.5 + Math.random() * 1.2, b: 0.3 + Math.random() * 0.7,
+        }));
+      }
+      g._stars.forEach(s => {
+        ctx.fillStyle = `rgba(255,255,255,${s.b})`;
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+      });
+      // Distant planet
+      ctx.fillStyle = '#2a1a3a';
+      ctx.beginPath(); ctx.arc(GW - 80, 70, 35, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#3a2a4a';
+      ctx.beginPath(); ctx.arc(GW - 72, 60, 35, 0, Math.PI * 2); ctx.fill();
+    },
+    drawPipe(ctx, x, y, w, h) {
+      drawPipeSimple(ctx, x, y, w, h, '#2c2c50', '#4a4a80');
+      const capH = 6, capY = (y === 0) ? y + h - capH : y;
+      ctx.fillStyle = '#3a3a6a'; ctx.fillRect(x - 3, capY, w + 6, capH);
+    },
+    pipeLabel: '#8888cc',
+    drawChar(ctx, x, y, flash, flashType) {
+      // Rocket
+      const col = flash > 0 && flashType === 'pass' ? '#60ee60'
+        : flash > 0 && flashType === 'hit' ? '#ff6060' : '#c0d0e8';
+      // Flame
+      ctx.fillStyle = '#ff8030';
+      ctx.beginPath(); ctx.moveTo(x - 10, y + 5); ctx.lineTo(x - 18, y); ctx.lineTo(x - 10, y - 5); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = '#ffcc40';
+      ctx.beginPath(); ctx.moveTo(x - 10, y + 3); ctx.lineTo(x - 14, y); ctx.lineTo(x - 10, y - 3); ctx.closePath(); ctx.fill();
+      // Body
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.ellipse(x, y, BR + 3, BR - 2, 0, 0, Math.PI * 2); ctx.fill();
+      // Nose cone
+      ctx.fillStyle = '#e04050';
+      ctx.beginPath(); ctx.moveTo(x + BR + 1, y - 4); ctx.lineTo(x + BR + 8, y); ctx.lineTo(x + BR + 1, y + 4); ctx.closePath(); ctx.fill();
+      // Window
+      ctx.fillStyle = '#4080cc';
+      ctx.beginPath(); ctx.arc(x + 3, y, 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#80c0ff';
+      ctx.beginPath(); ctx.arc(x + 2, y - 1, 1.5, 0, Math.PI * 2); ctx.fill();
+      // Fins
+      ctx.fillStyle = '#aabbcc';
+      ctx.beginPath(); ctx.moveTo(x - 6, y - BR + 1); ctx.lineTo(x - 10, y - BR - 5); ctx.lineTo(x - 2, y - BR + 1); ctx.closePath(); ctx.fill();
+      ctx.beginPath(); ctx.moveTo(x - 6, y + BR - 1); ctx.lineTo(x - 10, y + BR + 5); ctx.lineTo(x - 2, y + BR - 1); ctx.closePath(); ctx.fill();
+    },
+    barFill: '#4060aa', barTrack: 'rgba(255,255,255,0.06)', barText: 'rgba(255,255,255,0.3)',
+    flashPass: 'rgba(80,200,80,', flashFail: 'rgba(200,80,80,',
+  },
+
+  underwater: {
+    name: 'Underwater', emoji: '🐠',
+    border: '#2a6a7a',
+    drawBg(ctx, g) {
+      const water = ctx.createLinearGradient(0, 0, 0, GH);
+      water.addColorStop(0, '#1a5070'); water.addColorStop(0.5, '#0e3a50');
+      water.addColorStop(1, '#0a2a3a');
+      ctx.fillStyle = water; ctx.fillRect(0, 0, GW, GH);
+      // Light rays
+      ctx.save(); ctx.globalAlpha = 0.04;
+      for (let i = 0; i < 5; i++) {
+        const rx = 80 + i * 140;
+        ctx.fillStyle = '#88ccff';
+        ctx.beginPath(); ctx.moveTo(rx, 0); ctx.lineTo(rx - 30, GH); ctx.lineTo(rx + 30, GH); ctx.fill();
+      }
+      ctx.restore();
+      // Bubbles
+      if (!g._bubbles) {
+        g._bubbles = Array.from({ length: 12 }, () => ({
+          x: Math.random() * GW, y: Math.random() * GH,
+          r: 2 + Math.random() * 4, speed: 0.2 + Math.random() * 0.4,
+        }));
+      }
+      g._bubbles.forEach(b => {
+        b.y -= b.speed;
+        if (b.y < -10) { b.y = GH + 10; b.x = Math.random() * GW; }
+        ctx.strokeStyle = 'rgba(150,220,255,0.3)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = 'rgba(150,220,255,0.08)';
+        ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+      });
+      // Sandy floor
+      ctx.fillStyle = '#3a5540'; ctx.fillRect(0, GH - 25, GW, 25);
+      ctx.fillStyle = '#4a6a50'; ctx.fillRect(0, GH - 25, GW, 3);
+    },
+    drawPipe(ctx, x, y, w, h) {
+      drawPipeSimple(ctx, x, y, w, h, '#1a5a5a', '#2a8a7a');
+      // Coral cap
+      const capH = 7, capY = (y === 0) ? y + h - capH : y;
+      ctx.fillStyle = '#2a7a6a'; ctx.fillRect(x - 3, capY, w + 6, capH);
+    },
+    pipeLabel: '#5ac0b0',
+    drawChar(ctx, x, y, flash, flashType) {
+      // Fish
+      const col = flash > 0 && flashType === 'pass' ? '#40d890'
+        : flash > 0 && flashType === 'hit' ? '#e06060' : '#f0c040';
+      const darker = flash > 0 && flashType === 'pass' ? '#30a870'
+        : flash > 0 && flashType === 'hit' ? '#b04040' : '#d0a020';
+      // Tail
+      ctx.fillStyle = darker;
+      ctx.beginPath(); ctx.moveTo(x - 12, y); ctx.lineTo(x - 20, y - 7); ctx.lineTo(x - 20, y + 7); ctx.closePath(); ctx.fill();
+      // Body
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.ellipse(x, y, BR + 3, BR, 0, 0, Math.PI * 2); ctx.fill();
+      // Belly stripe
+      ctx.fillStyle = '#fff8d0';
+      ctx.beginPath(); ctx.ellipse(x + 1, y + 3, BR, 4, 0, 0, Math.PI * 2); ctx.fill();
+      // Dorsal fin
+      ctx.fillStyle = darker;
+      ctx.beginPath(); ctx.moveTo(x - 2, y - BR + 1); ctx.lineTo(x + 2, y - BR - 6); ctx.lineTo(x + 8, y - BR + 1); ctx.closePath(); ctx.fill();
+      // Eye
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(x + 8, y - 2, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(x + 9, y - 2, 1.5, 0, Math.PI * 2); ctx.fill();
+      // Mouth
+      ctx.strokeStyle = darker; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(x + 14, y + 1, 2, 0.2, Math.PI * 0.8); ctx.stroke();
+    },
+    barFill: '#2a9080', barTrack: 'rgba(0,0,0,0.2)', barText: 'rgba(180,230,220,0.5)',
+    flashPass: 'rgba(60,180,140,', flashFail: 'rgba(180,60,60,',
+  },
+
+  sunset: {
+    name: 'Sunset', emoji: '🌅',
+    border: '#8a5a4a',
+    drawBg(ctx, g) {
+      const grad = ctx.createLinearGradient(0, 0, 0, GH);
+      grad.addColorStop(0, '#2a1a3a'); grad.addColorStop(0.25, '#6a2a4a');
+      grad.addColorStop(0.5, '#d06030'); grad.addColorStop(0.7, '#e8a040');
+      grad.addColorStop(0.85, '#c07838'); grad.addColorStop(1, '#2a2018');
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, GW, GH);
+      // Sun
+      ctx.fillStyle = '#ffe080';
+      ctx.beginPath(); ctx.arc(GW * 0.65, GH * 0.48, 30, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff0b0';
+      ctx.beginPath(); ctx.arc(GW * 0.65, GH * 0.48, 22, 0, Math.PI * 2); ctx.fill();
+      // Clouds
+      g.clouds.forEach(c => {
+        c.x -= c.speed * 0.6;
+        if (c.x + c.w < -20) { c.x = GW + 20; c.y = 20 + Math.random() * 60; }
+        ctx.fillStyle = 'rgba(200,120,80,0.3)';
+        ctx.beginPath(); ctx.ellipse(c.x, c.y, c.w / 2, 10, 0, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.ellipse(c.x + c.w * 0.2, c.y + 3, c.w * 0.3, 8, 0, 0, Math.PI * 2); ctx.fill();
+      });
+      // Ground silhouette
+      ctx.fillStyle = '#1a1510'; ctx.fillRect(0, GH - 35, GW, 35);
+      // Hills
+      ctx.fillStyle = '#2a2018';
+      ctx.beginPath(); ctx.moveTo(0, GH - 35);
+      for (let hx = 0; hx <= GW; hx += 5) {
+        ctx.lineTo(hx, GH - 35 - Math.sin(hx * 0.012) * 15 - Math.sin(hx * 0.03) * 6);
+      }
+      ctx.lineTo(GW, GH - 35); ctx.fill();
+    },
+    drawPipe(ctx, x, y, w, h) {
+      drawPipeSimple(ctx, x, y, w, h, '#3a2018', '#5a3828');
+      const capH = 6, capY = (y === 0) ? y + h - capH : y;
+      ctx.fillStyle = '#4a2820'; ctx.fillRect(x - 3, capY, w + 6, capH);
+    },
+    pipeLabel: '#c08050',
+    drawChar(ctx, x, y, flash, flashType) {
+      // Butterfly
+      const col = flash > 0 && flashType === 'pass' ? '#90d050'
+        : flash > 0 && flashType === 'hit' ? '#e05040' : '#e8a0d0';
+      const col2 = flash > 0 && flashType === 'pass' ? '#c0e880'
+        : flash > 0 && flashType === 'hit' ? '#ff8060' : '#f0d060';
+      // Upper wings
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.ellipse(x - 4, y - 6, 9, 7, -0.3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x + 4, y - 6, 9, 7, 0.3, 0, Math.PI * 2); ctx.fill();
+      // Lower wings
+      ctx.fillStyle = col2;
+      ctx.beginPath(); ctx.ellipse(x - 5, y + 3, 7, 5, -0.2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x + 5, y + 3, 7, 5, 0.2, 0, Math.PI * 2); ctx.fill();
+      // Wing dots
+      ctx.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx.beginPath(); ctx.arc(x - 4, y - 7, 2.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + 4, y - 7, 2.5, 0, Math.PI * 2); ctx.fill();
+      // Body
+      ctx.fillStyle = '#4a3030';
+      ctx.beginPath(); ctx.ellipse(x, y, 2.5, 8, 0, 0, Math.PI * 2); ctx.fill();
+      // Antennae
+      ctx.strokeStyle = '#4a3030'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x - 1, y - 8); ctx.quadraticCurveTo(x - 6, y - 16, x - 8, y - 14); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x + 1, y - 8); ctx.quadraticCurveTo(x + 6, y - 16, x + 8, y - 14); ctx.stroke();
+      ctx.fillStyle = '#4a3030';
+      ctx.beginPath(); ctx.arc(x - 8, y - 14, 1.2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + 8, y - 14, 1.2, 0, Math.PI * 2); ctx.fill();
+    },
+    barFill: '#c07030', barTrack: 'rgba(0,0,0,0.2)', barText: 'rgba(255,220,180,0.4)',
+    flashPass: 'rgba(140,180,50,', flashFail: 'rgba(180,50,40,',
+  },
+
+  winter: {
+    name: 'Winter', emoji: '❄️',
+    border: '#8aaccc',
+    drawBg(ctx, g) {
+      const grad = ctx.createLinearGradient(0, 0, 0, GH);
+      grad.addColorStop(0, '#c0d8e8'); grad.addColorStop(0.6, '#e0e8f0');
+      grad.addColorStop(0.8, '#f0f4f8'); grad.addColorStop(1, '#e8eef4');
+      ctx.fillStyle = grad; ctx.fillRect(0, 0, GW, GH);
+      // Snowflakes
+      if (!g._snow) {
+        g._snow = Array.from({ length: 30 }, () => ({
+          x: Math.random() * GW, y: Math.random() * GH,
+          r: 1 + Math.random() * 2, speed: 0.3 + Math.random() * 0.5,
+          drift: (Math.random() - 0.5) * 0.3,
+        }));
+      }
+      g._snow.forEach(s => {
+        s.y += s.speed; s.x += s.drift;
+        if (s.y > GH + 5) { s.y = -5; s.x = Math.random() * GW; }
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+      });
+      // Snow ground
+      ctx.fillStyle = '#e8eef4'; ctx.fillRect(0, GH - 35, GW, 35);
+      // Snow mounds
+      ctx.fillStyle = '#f0f4f8';
+      ctx.beginPath(); ctx.moveTo(0, GH - 35);
+      for (let sx = 0; sx <= GW; sx += 5) {
+        ctx.lineTo(sx, GH - 35 - Math.sin(sx * 0.02) * 8 - Math.cos(sx * 0.05) * 4);
+      }
+      ctx.lineTo(GW, GH - 35); ctx.fill();
+      // Pine trees silhouette
+      [60, 200, 400, 550, 650].forEach(tx => {
+        const th = 30 + Math.sin(tx) * 10;
+        ctx.fillStyle = '#5a7a6a';
+        ctx.beginPath();
+        ctx.moveTo(tx, GH - 35 - th);
+        ctx.lineTo(tx - 12, GH - 35);
+        ctx.lineTo(tx + 12, GH - 35);
+        ctx.fill();
+      });
+    },
+    drawPipe(ctx, x, y, w, h) {
+      drawPipeSimple(ctx, x, y, w, h, '#8ab4cc', '#a0c8dd');
+      // Ice cap
+      const capH = 6, capY = (y === 0) ? y + h - capH : y;
+      ctx.fillStyle = '#b0d4e8'; ctx.fillRect(x - 3, capY, w + 6, capH);
+      // Icicles on bottom of top pipe
+      if (y === 0) {
+        ctx.fillStyle = '#c0ddef';
+        for (let ix = x + 5; ix < x + w - 5; ix += 10) {
+          ctx.beginPath();
+          ctx.moveTo(ix - 2, y + h); ctx.lineTo(ix, y + h + 8); ctx.lineTo(ix + 2, y + h);
+          ctx.fill();
+        }
+      }
+    },
+    pipeLabel: '#4a7a90',
+    drawChar(ctx, x, y, flash, flashType) {
+      // Penguin
+      const bodyCol = flash > 0 && flashType === 'pass' ? '#50b060'
+        : flash > 0 && flashType === 'hit' ? '#c04040' : '#2a2a3a';
+      // Body
+      ctx.fillStyle = bodyCol;
+      ctx.beginPath(); ctx.ellipse(x, y, BR, BR + 2, 0, 0, Math.PI * 2); ctx.fill();
+      // Belly
+      ctx.fillStyle = '#e8e8f0';
+      ctx.beginPath(); ctx.ellipse(x + 1, y + 2, BR - 4, BR - 2, 0, 0, Math.PI * 2); ctx.fill();
+      // Wings
+      ctx.fillStyle = bodyCol;
+      ctx.beginPath(); ctx.ellipse(x - BR + 1, y + 1, 4, 7, 0.2, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x + BR - 1, y + 1, 4, 7, -0.2, 0, Math.PI * 2); ctx.fill();
+      // Eyes
+      ctx.fillStyle = '#fff';
+      ctx.beginPath(); ctx.arc(x - 4, y - 5, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + 4, y - 5, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(x - 3, y - 5, 1.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x + 5, y - 5, 1.5, 0, Math.PI * 2); ctx.fill();
+      // Beak
+      ctx.fillStyle = '#e0a030';
+      ctx.beginPath(); ctx.moveTo(x - 3, y - 1); ctx.lineTo(x, y + 3); ctx.lineTo(x + 3, y - 1); ctx.closePath(); ctx.fill();
+      // Feet
+      ctx.fillStyle = '#e0a030';
+      ctx.beginPath(); ctx.ellipse(x - 4, y + BR + 1, 4, 2, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(x + 4, y + BR + 1, 4, 2, 0, 0, Math.PI * 2); ctx.fill();
+    },
+    barFill: '#5090b0', barTrack: 'rgba(0,0,0,0.08)', barText: 'rgba(0,0,0,0.35)',
+    flashPass: 'rgba(80,180,80,', flashFail: 'rgba(180,60,60,',
+  },
+};
 
 // ── Game ──────────────────────────────────────────────────────────────────────
 function FlappyBallGame({
   activation, tOn, activeNow, decision, targetGesture, gestureColor,
-  onPipeResolve, speedMultiplier, paused,
+  onPipeResolve, speedMultiplier, paused, theme,
 }) {
   const canvasRef = useRef(null);
   const lastDecisionTokenRef = useRef(null);
@@ -187,11 +551,17 @@ function FlappyBallGame({
     flash: 0,
     flashType: 'none',
     ready: false,
+    clouds: Array.from({ length: 5 }, () => ({
+      x: Math.random() * GW,
+      y: 15 + Math.random() * 80,
+      w: 50 + Math.random() * 70,
+      speed: 0.15 + Math.random() * 0.25,
+    })),
   });
 
   const L = useRef({
     activation, tOn: tOnVal, activeNow, decision, speedMultiplier, paused,
-    onPipeResolve, targetGesture, gestureColor,
+    onPipeResolve, targetGesture, gestureColor, theme: null,
   });
 
   useEffect(() => {
@@ -204,6 +574,7 @@ function FlappyBallGame({
     L.current.onPipeResolve   = onPipeResolve;
     L.current.targetGesture   = targetGesture;
     L.current.gestureColor    = gestureColor;
+    L.current.theme           = theme;
   });
 
   function spawnPipe(x) {
@@ -319,56 +690,42 @@ function FlappyBallGame({
 
       if (g.flash > 0) g.flash--;
 
-      ctx.fillStyle = '#06060f';
-      ctx.fillRect(0, 0, GW, GH);
-      ctx.strokeStyle = '#ffffff07'; ctx.lineWidth = 1;
-      for (let x = 0; x < GW; x += 60) {
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, GH); ctx.stroke();
-      }
-      for (let y = 0; y < GH; y += 50) {
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(GW, y); ctx.stroke();
-      }
+      const T = l.theme || GAME_THEMES.outdoor;
 
+      // ── Background ──
+      T.drawBg(ctx, g);
+
+      // ── Subtle pass/fail tint ──
       if (g.flash > 0) {
-        const alpha = (g.flash / 30) * 0.22;
-        ctx.fillStyle = g.flashType === 'pass'
-          ? `rgba(105,255,71,${alpha})` : `rgba(255,64,129,${alpha})`;
+        const alpha = (g.flash / 30) * 0.08;
+        ctx.fillStyle = (g.flashType === 'pass' ? T.flashPass : T.flashFail) + alpha + ')';
         ctx.fillRect(0, 0, GW, GH);
       }
 
+      // ── Pipes ──
       g.pipes.forEach(p => {
-        const col = p.color || '#5c5cff';
         const gapBot = p.gapTop + GAP_H;
-        drawPipe(ctx, p.x, 0, PW, p.gapTop, col);
-        drawPipe(ctx, p.x, gapBot, PW, GH - gapBot, col);
-        ctx.save();
+        T.drawPipe(ctx, p.x, 0, PW, p.gapTop);
+        T.drawPipe(ctx, p.x, gapBot, PW, GH - gapBot);
         ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle'; ctx.shadowColor = col; ctx.shadowBlur = 12;
-        ctx.fillStyle = col;
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = T.pipeLabel;
         ctx.fillText(p.label, p.x + PW / 2, gapCenterY(p.gapTop));
-        ctx.restore();
       });
 
-      const bc = g.flash > 0 && g.flashType === 'pass' ? '#69ff47'
-        : g.flash > 0 && g.flashType === 'hit' ? '#ff4081' : '#00e5ff';
-      ctx.save(); ctx.shadowColor = bc; ctx.shadowBlur = 20;
-      const bg = ctx.createRadialGradient(BX - 4, g.ballY - 4, 2, BX, g.ballY, BR);
-      bg.addColorStop(0, '#ffffff'); bg.addColorStop(0.45, bc); bg.addColorStop(1, '#00000055');
-      ctx.beginPath(); ctx.arc(BX, g.ballY, BR, 0, Math.PI * 2);
-      ctx.fillStyle = bg; ctx.fill(); ctx.restore();
+      // ── Character ──
+      T.drawChar(ctx, BX, g.ballY, g.flash, g.flashType);
 
-      // Activation bar — scaled to tOn_ * 2.5 so it fills naturally during a gesture
+      // ── Activation bar ──
       const barH  = GH - 30;
       const fillH = Math.min(1, l.activation / (tOn_ * 2.5)) * barH;
-      ctx.fillStyle = '#ffffff08';
+      ctx.fillStyle = T.barTrack;
       ctx.beginPath(); ctx.roundRect(8, 15, 10, barH, 5); ctx.fill();
       if (fillH > 0) {
-        const bg2 = ctx.createLinearGradient(0, 15 + barH, 0, 15 + barH - fillH);
-        bg2.addColorStop(0, '#00e5ff'); bg2.addColorStop(1, '#ff4081');
-        ctx.fillStyle = bg2;
+        ctx.fillStyle = T.barFill;
         ctx.beginPath(); ctx.roundRect(8, 15 + barH - fillH, 10, fillH, 4); ctx.fill();
       }
-      ctx.fillStyle = '#ffffff55'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+      ctx.fillStyle = T.barText; ctx.font = '9px monospace'; ctx.textAlign = 'center';
       ctx.fillText(l.activation.toFixed(1), 13, GH - 4);
 
       rafId = requestAnimationFrame(loop);
@@ -381,7 +738,7 @@ function FlappyBallGame({
   return (
     <canvas ref={canvasRef} width={GW} height={GH}
       style={{ width:'100%', height:'auto', display:'block',
-        borderRadius:10, border:'1px solid #1e1e35' }} />
+        borderRadius:10, border:`1px solid ${(theme || GAME_THEMES.outdoor).border}` }} />
   );
 }
 
@@ -423,6 +780,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const [gestures,      setGestures]      = useState([]);
   const [focusGestures, setFocusGestures] = useState([]);
   const [speedMult,     setSpeedMult]     = useState(1.0);
+  const [gameTheme,     setGameTheme]     = useState('outdoor');
 
   const [sessionId,      setSessionId]      = useState(null);
   const [gesturePool,    setGesturePool]    = useState([]);
@@ -452,6 +810,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
   const simRef      = useRef(null);
   const simRunning  = useRef(false);
+  const simResetRef = useRef(false);
   const curRef      = useRef(null);
   const poolRef     = useRef([]);
   const classifyRef = useRef(null);
@@ -491,6 +850,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const advanceToNext = useCallback(() => {
     setPrediction(null); setVotes([]); setPendingResult(null);
     setRetryCount(0); setGamePaused(false);
+    simResetRef.current = true;
     if (mode === 'simulated') {
       const next = (simIdxRef.current + 1) % SIM_GESTURE_ORDER.length;
       setSimIdx(next); simIdxRef.current = next;
@@ -606,6 +966,16 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
     const iv = setInterval(() => {
       if (!simRunning.current) return;
+
+      // Reset sim internal state when a new gesture starts
+      if (simResetRef.current) {
+        simResetRef.current = false;
+        simPhase = 'rest';
+        timer = 0;
+        act = 0;
+        fired = false;
+      }
+
       timer++;
       const noise = () => (Math.random() - 0.5) * (SIM_T_ON * 0.04);
 
@@ -882,6 +1252,20 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
             </div>
           </div>
 
+          <div className="train-setup-section">
+            <label className="train-setup-label">Theme</label>
+            <div style={{ display:'flex', flexWrap:'wrap', gap:6, marginTop:4 }}>
+              {Object.entries(GAME_THEMES).map(([key, t]) => (
+                <button key={key}
+                  className={`btn btn-mode ${gameTheme===key?'active':''}`}
+                  onClick={() => setGameTheme(key)}
+                  style={{ display:'flex', alignItems:'center', gap:5, fontSize:'0.78rem' }}>
+                  <span>{t.emoji}</span> {t.name}
+                </button>
+              ))}
+            </div>
+          </div>
+
 
         </div>
 
@@ -1019,6 +1403,35 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
               Retry {retryCount}/{MAX_RETRIES}
             </div>
           )}
+
+          {/* Live detected gesture indicator */}
+          {pendingResult?.predicted && (() => {
+            const isMatch = pendingResult.predicted === currentGesture?.name;
+            const detCol = isMatch ? '#69ff47' : '#ff4081';
+            return (
+              <div style={{ marginLeft: retryCount > 0 ? 0 : 'auto',
+                display:'flex', alignItems:'center', gap:10,
+                background:'#0a0a16', border:`1px solid ${detCol}44`,
+                borderRadius:8, padding:'6px 14px' }}>
+                {GESTURE_IMAGES[pendingResult.predicted] && (
+                  <img src={GESTURE_IMAGES[pendingResult.predicted]} alt={pendingResult.predicted}
+                    style={{ width:36, height:36, objectFit:'cover', borderRadius:6,
+                      border:`2px solid ${detCol}55` }} />
+                )}
+                <div>
+                  <div style={{ fontSize:'0.6rem', color:'#666', fontFamily:'monospace', letterSpacing:1 }}>
+                    DETECTED
+                  </div>
+                  <div style={{ fontSize:'1rem', fontWeight:800, color:detCol,
+                    fontFamily:'monospace', letterSpacing:1,
+                    textShadow:`0 0 10px ${detCol}` }}>
+                    {pendingResult.predicted.toUpperCase()}
+                  </div>
+                </div>
+                <span style={{ fontSize:'1.2rem' }}>{isMatch ? '✓' : '✗'}</span>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -1034,6 +1447,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
           onPipeResolve={onPipeResolve}
           speedMultiplier={speedMult}
           paused={gamePaused}
+          theme={GAME_THEMES[gameTheme] || GAME_THEMES.outdoor}
         />
 
         {/* Mismatch overlay */}
