@@ -2,18 +2,13 @@
 Flask + Flask-SocketIO backend for the EMG Gesture Classifier.
 Streams real-time classification results to a React frontend via WebSocket.
 
-CRITICAL FIXES vs previous version (matched to RealTimeGestureClassifier.py):
-─────────────────────────────────────────────────────────────────────────────
-1. T_ON = 2.4, T_OFF = 1.8  (was 1.0 / 0.6 — that's why gestures never triggered)
-2. MIN_VOTES = 15            (was 8)
-3. REST calibration uses FILTERED data, not raw  (matches ClassifierThread._process_sample)
-4. Detection buffer uses FILTERED data, not raw  (matches ClassifierThread._process_sample)
-5. calibration_s = 2.0 s of filtered samples collected before any detection starts
-6. LiveSource now opens a proper TCP server socket (bind + listen + accept) exactly
-   like SessantaquattroPlus.start_server(), sends the command word, then reads
-   packets of shape (n_channels, frequency//16) big-endian int16.
-   The frontend liveOpts {host, port} are used as the LISTEN address —
-   the Sessantaquattro+ software connects TO this server.
+THRESHOLD SYSTEM (matches NEWREALCLASSIFIER.py)
+────────────────────────────────────────────────
+act = median(RMS per channel)   ← absolute, no rest_mean division
+T_ON_ABS / T_OFF_ABS are raw ADC RMS values, same as in NEWREALCLASSIFIER.py.
+
+Set PRINT_CALIB_HINT = True once per participant to discover the right values,
+then set PRINT_CALIB_HINT = False and hardcode T_ON_ABS / T_OFF_ABS.
 """
 
 import os, sys, threading, time, random, json, sqlite3, socket, struct
@@ -33,7 +28,7 @@ from models import db, User, Gesture, UserGesture, Session, TrainingGesture, Tes
 # ── Paths ────────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAT_PATH   = os.path.join(BASE_DIR, "KateGesturesRound2Jan20.mat")
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "maline_mar28_multi.pkl") #"maline_mar26_multi.pkl"
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kate_model_mar30.pkl")
 PLAYBACK_SPEED = 1.0
 
 # ── Gesture catalogue ────────────────────────────────────────────────────────
@@ -47,25 +42,34 @@ GESTURE_COLORS = {
     "Okay": "#00e676", "Spiderman": "#ff1744",
 }
 
-# ── Signal processing parameters — MUST match RealTimeGestureClassifier.py ──
+# ── Signal processing parameters — MUST match NEWREALCLASSIFIER.py ───────────
 F_LOWER, F_UPPER = 20, 450
 F_NOTCH, BW_NOTCH = 60, 2
-# !! These values are critical — using 1.0/0.6 is why live EMG never triggered
-T_ON            = 1 #change to 1?, sometimes 2.4
-T_OFF           = 0.6 #change to 0.6, sometimes 1.8
+
+# ── Absolute RMS thresholds (same as NEWREALCLASSIFIER.py) ───────────────────
+#   act = median(RMS per channel)   ← raw ADC units, no normalisation
+#
+#   Set PRINT_CALIB_HINT = True once; the console will print suggested values.
+#   Then set PRINT_CALIB_HINT = False and paste the values below.
+#
+PRINT_CALIB_HINT = False   # set True once per participant to find thresholds
+CALIB_HINT_S     = 2.0     # seconds of rest to collect for hint
+
+T_ON_ABS  = 40    # ← replace with your participant's value
+T_OFF_ABS = 25    # ← replace with your participant's value
+
 N_ON            = 1
 N_OFF           = 1
 DET_WIN_MS      = 200
 DET_STEP_MS     = 100
 WIN_MS          = 200
 MAX_GESTURE_S   = 3.5
-MIN_VOTES       = 15    # was 8 — too low, causes spurious classifications
-REST_CALIB_S    = 2 #was 2   # seconds of filtered data for rest baseline
+MIN_VOTES       = 20
 
-# Sessantaquattro+ command parameters (matches RealTimeGestureClassifier.py main())
+# Sessantaquattro+ command parameters
 S64_FSAMP = 2   # → 2000 Hz
 S64_NCH   = 3   # → 72 total channels
-S64_MODE  = 0   # standard mode
+S64_MODE  = 0
 S64_HRES  = 0
 S64_HPF   = 1
 S64_EXTEN = 0
@@ -127,14 +131,13 @@ def initialize_database():
     for g in starter_gestures:
         for ug in UserGesture.query.filter_by(gesture_id=g.id, is_unlocked=False).all():
             ug.is_unlocked = True
-    
     db.session.commit()
 
 with app.app_context():
     initialize_database()
 
 
-# ── Feature extraction (identical to both classifier scripts) ─────────────────
+# ── Feature extraction ────────────────────────────────────────────────────────
 def feats(w, thr=0.01):
     ch, _ = w.shape
     MAV = np.mean(np.abs(w), axis=1)
@@ -151,13 +154,11 @@ def feats(w, thr=0.01):
 def s64_make_command(fsamp=S64_FSAMP, nch=S64_NCH, mode=S64_MODE,
                      hres=S64_HRES, hpf=S64_HPF, exten=S64_EXTEN,
                      trig=S64_TRIG, rec=S64_REC, go=S64_GO):
-    """Build the 2-byte command word (matches SessantaquattroPlus.create_command)."""
     return (go | (rec<<1) | (trig<<2) | (exten<<4) |
             (hpf<<6) | (hres<<7) | (mode<<8) | (nch<<11) | (fsamp<<13))
 
 
 def s64_num_channels(nch=S64_NCH, mode=S64_MODE):
-    """Return total channel count for the given NCH / MODE bits."""
     tbl = {0: (16, 12), 1: (24, 16), 2: (40, 24), 3: (72, 40)}
     standard, hp = tbl.get(nch, (72, 40))
     return hp if mode == 1 else standard
@@ -170,7 +171,6 @@ def s64_sampling_freq(fsamp=S64_FSAMP, mode=S64_MODE):
 
 
 def recvall(sock, n):
-    """Read exactly n bytes from socket, handling partial TCP reads."""
     buf = bytearray()
     while len(buf) < n:
         chunk = sock.recv(n - len(buf))
@@ -180,7 +180,7 @@ def recvall(sock, n):
     return bytes(buf)
 
 
-# ── Simulated source (mat file replay) ───────────────────────────────────────
+# ── Simulated source ──────────────────────────────────────────────────────────
 class SimulatedSource:
     def __init__(self, mat_path, speed=1.0):
         m = loadmat(mat_path)
@@ -188,9 +188,6 @@ class SimulatedSource:
         self.Fs   = float(np.squeeze(m['SamplingFrequency']))
         self.speed = speed
         self.n_channels = 64
-        # Rest data: first 2 s
-        n_rest = int(REST_CALIB_S * self.Fs)
-        self.rest_data = self.sig[:n_rest, :].T  # shape (64, n_rest)
         self._stop = False
 
     def stream(self):
@@ -199,7 +196,7 @@ class SimulatedSource:
             if self._stop:
                 break
             t0 = time.perf_counter()
-            yield row  # shape (64,)
+            yield row
             rem = dt - (time.perf_counter() - t0)
             if rem > 0:
                 time.sleep(rem)
@@ -207,32 +204,24 @@ class SimulatedSource:
     def stop(self):
         self._stop = True
 
+    def pause(self): pass
+    def resume(self): pass
 
-# ── Live source (Sessantaquattro+ TCP) ───────────────────────────────────────
+
+# ── Live source ───────────────────────────────────────────────────────────────
 class LiveSource:
-    """
-    Opens a TCP server on host:port, waits for the Sessantaquattro+ amplifier
-    software to connect, sends the command word, then streams EMG samples.
-
-    Packet format (matches DataReceiverThread.run):
-      Each packet = n_channels * 2 * (Fs // 16) bytes
-      Big-endian int16, reshaped to (n_total_channels, samples_per_packet)
-      We take first 64 rows as EMG.
-    """
     def __init__(self, host="0.0.0.0", port=45454,
                  fsamp=S64_FSAMP, nch=S64_NCH, mode=S64_MODE,
-                 emg_channels=64, calibration_s=REST_CALIB_S,
-                 on_log=None):
+                 emg_channels=64, on_log=None):
         self.host          = host
         self.port          = port
         self.fsamp_bits    = fsamp
         self.nch_bits      = nch
         self.mode_bits     = mode
         self.emg_channels  = emg_channels
-        self.calibration_s = calibration_s
         self.on_log        = on_log or (lambda msg: None)
 
-        self.n_channels    = s64_num_channels(nch, mode)   # total (e.g. 72)
+        self.n_channels    = s64_num_channels(nch, mode)
         self.Fs            = float(s64_sampling_freq(fsamp, mode))
 
         self._server_sock  = None
@@ -253,15 +242,14 @@ class LiveSource:
         self._client_sock, addr = self._server_sock.accept()
         self.on_log(f"[live] amplifier connected from {addr}")
 
-        # Send start command (2 bytes big-endian signed int)
         self._client_sock.send(cmd.to_bytes(2, byteorder='big', signed=True))
-        self.on_log(f"[live] command sent — streaming started")
+        self.on_log("[live] command sent — streaming started")
 
     def stream(self):
         self._connect()
         samples_per_packet = int(self.Fs) // 16
         packet_bytes = self.n_channels * 2 * samples_per_packet
-        self.on_log(f"[live] packet size = {packet_bytes} bytes  "
+        self.on_log(f"[live] packet size = {packet_bytes} bytes "
                     f"({self.n_channels} ch × 2 B × {samples_per_packet} samp)")
 
         while not self._stop:
@@ -272,9 +260,9 @@ class LiveSource:
                     break
                 unpacked = struct.unpack(f'>{len(data)//2}h', data)
                 block    = np.array(unpacked).reshape((-1, self.n_channels)).T
-                emg      = block[:self.emg_channels, :].astype(float)  # (64, N)
+                emg      = block[:self.emg_channels, :].astype(float)
                 for i in range(emg.shape[1]):
-                    yield emg[:, i]  # yield one sample at a time, shape (64,)
+                    yield emg[:, i]
             except Exception as e:
                 self.on_log(f"[live] recv error: {e}")
                 break
@@ -288,13 +276,15 @@ class LiveSource:
             if self._server_sock: self._server_sock.close()
         except: pass
 
+    def pause(self): pass
+    def resume(self): pass
+
 
 # ── Core worker ───────────────────────────────────────────────────────────────
 def run_worker(mode="simulated", live_opts=None):
     """
     Process EMG data and emit SocketIO updates.
-    Signal processing pipeline is identical to ClassifierThread in
-    RealTimeGestureClassifier.py.
+    Uses absolute RMS thresholds — matches NEWREALCLASSIFIER.py exactly.
     """
     global worker_running, active_source
     worker_running = True
@@ -311,7 +301,7 @@ def run_worker(mode="simulated", live_opts=None):
 
     try:
         scaler, model = joblib.load(MODEL_PATH)
-        socketio.emit("log", {"text": f"✓  model loaded"})
+        socketio.emit("log", {"text": "✓  model loaded"})
     except Exception as e:
         socketio.emit("log", {"text": f"ERROR loading model: {e}"})
         worker_running = False
@@ -326,10 +316,9 @@ def run_worker(mode="simulated", live_opts=None):
             nch=int(live_opts.get("nch", S64_NCH)),
             mode=int(live_opts.get("mode_bits", S64_MODE)),
             emg_channels=int(live_opts.get("emg_channels", 64)),
-            calibration_s=float(live_opts.get("calibration_s", REST_CALIB_S)),
             on_log=lambda msg: socketio.emit("log", {"text": msg}),
         )
-        Fs = source.Fs
+        Fs   = source.Fs
         n_ch = source.emg_channels
     else:
         try:
@@ -344,7 +333,7 @@ def run_worker(mode="simulated", live_opts=None):
 
     active_source = source
 
-    # ── Filters (identical to ClassifierThread.__init__) ──────────────────
+    # ── Filters ───────────────────────────────────────────────────────────
     nyq = Fs / 2
     b_bp, a_bp = butter(2, [F_LOWER/nyq, F_UPPER/nyq], btype='band')
     b_n,  a_n  = iirnotch(F_NOTCH/nyq, F_NOTCH/BW_NOTCH)
@@ -352,7 +341,6 @@ def run_worker(mode="simulated", live_opts=None):
     zi_n  = np.tile(lfilter_zi(b_n,  a_n),  (n_ch, 1))
 
     def filt(raw_1d):
-        """Filter one (n_ch,) sample.  Updates zi_bp / zi_n in-place."""
         nonlocal zi_bp, zi_n
         y, zi_bp[:] = lfilter(b_bp, a_bp, raw_1d[:, None], zi=zi_bp)
         y, zi_n[:]  = lfilter(b_n,  a_n,  y,               zi=zi_n)
@@ -363,53 +351,56 @@ def run_worker(mode="simulated", live_opts=None):
     det_step = int(DET_STEP_MS / 1000 * Fs)
     win_s    = int(WIN_MS      / 1000 * Fs)
     max_g    = int(MAX_GESTURE_S * Fs)
-    calib_n  = int(REST_CALIB_S  * Fs)
 
-    # ── State ─────────────────────────────────────────────────────────────
-    calib_buf   = []
-    calib_done  = False
-    rest_mean   = np.ones(n_ch)   # overwritten after calibration
+    # ── Optional calibration hint state ──────────────────────────────────
+    hint_buf    = []
+    hint_done   = False
+    hint_needed = int(CALIB_HINT_S * Fs)
 
+    # ── Detection state ───────────────────────────────────────────────────
     det_buf     = deque(maxlen=det_win)
     gest_buf    = []
     det_ctr     = 0
-    state_      = 0   # 0=REST, 1=ACTIVE
+    state_      = 0
     cnt_on      = 0
     cnt_off     = 0
     votes       = []
     last_printed= ""
     log_ctr     = 0
 
-    # Signal buffers for frontend strip
+    # Signal strip buffers (absolute RMS per half-array)
     sig_flex = []
     sig_ext  = []
 
-    socketio.emit("log", {"text": "Calibrating REST baseline — keep hand relaxed"})
-    socketio.emit("state", {"label": "CALIBRATING", "gesture": "REST", "color": "#444444", "act": 0.0})
+    if PRINT_CALIB_HINT:
+        socketio.emit("log", {"text": f"HINT MODE: collecting {CALIB_HINT_S}s rest baseline…"})
+        socketio.emit("state", {"label": "HINT MODE", "gesture": "—", "color": "#e040fb", "act": 0.0})
+    else:
+        socketio.emit("log", {"text": f"✓  ready — T_ON={T_ON_ABS}  T_OFF={T_OFF_ABS}  (absolute RMS)"})
+        socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
 
     # ── Main sample loop ──────────────────────────────────────────────────
     for raw in source.stream():
         if not worker_running:
             break
 
-        # DC remove + filter  (ClassifierThread._filt uses raw - mean(raw))
         filtered = filt(raw - np.mean(raw))
 
-        # ── REST calibration: collect filtered samples ─────────────────
-        # (ClassifierThread uses filtered data in _calib_buf, not raw)
-        if not calib_done:
-            calib_buf.append(filtered)
-            if len(calib_buf) >= calib_n:
-                arr = np.stack(calib_buf, axis=1)          # (n_ch, calib_n)
-                rest_mean = np.sqrt(np.mean(arr**2, axis=1)) + 1e-8
-                calib_done = True
-                calib_buf.clear()
-                socketio.emit("log", {"text": f"✓  calibration done  (median RMS: {float(np.median(rest_mean)):.4f})"})
-                socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
-            continue   # don't classify until calibration is complete
+        # ── Optional calibration hint (non-blocking) ──────────────────────
+        if PRINT_CALIB_HINT and not hint_done:
+            hint_buf.append(filtered)
+            if len(hint_buf) >= hint_needed:
+                arr       = np.stack(hint_buf, axis=1)
+                rest_mean = np.sqrt(np.mean(arr ** 2, axis=1))
+                med       = float(np.median(rest_mean))
+                msg = (f"HINT: median rest RMS={med:.4f}  "
+                       f"→ T_ON={2.4*med:.1f}  T_OFF={1.6*med:.1f}")
+                print(f"\n{'='*55}\n  {msg}\n{'='*55}\n")
+                socketio.emit("log", {"text": msg})
+                hint_done = True
+            # Fall through — keep classifying with current absolute thresholds
 
-        # ── Detection buffer uses FILTERED data ───────────────────────
-        # (ClassifierThread.det_buf receives filtered samples, not raw)
+        # ── Accumulate buffers ────────────────────────────────────────────
         if state_ == 1:
             gest_buf.append(filtered)
         det_buf.append(filtered)
@@ -421,20 +412,22 @@ def run_worker(mode="simulated", live_opts=None):
             continue
         det_ctr = 0
 
-        # ── Activation (identical to ClassifierThread._process_sample) ─
-        w   = np.stack(det_buf, axis=1)                    # (n_ch, det_win)
-        act = float(np.median(np.sqrt(np.mean(w**2, axis=1)) / rest_mean))
+        # ── Activation: absolute median RMS — no rest_mean division ──────
+        w   = np.stack(det_buf, axis=1)
+        act = float(np.median(np.sqrt(np.mean(w ** 2, axis=1))))
 
-        # Signal strip buffers
-        act_flex = float(np.median(np.sqrt(np.mean(w[:32]**2, axis=1)) / rest_mean[:32]))
-        act_ext  = float(np.median(np.sqrt(np.mean(w[32:64]**2, axis=1)) / rest_mean[32:64]))
+        # Signal strip: absolute RMS for flexors (ch 0–31) and extensors (ch 32–63)
+        act_flex = float(np.median(np.sqrt(np.mean(w[:32] ** 2, axis=1))))
+        act_ext  = float(np.median(np.sqrt(np.mean(w[32:64] ** 2, axis=1))))
         sig_flex.append(act_flex)
         sig_ext.append(act_ext)
         wf = sig_flex[-100:]; we = sig_ext[-100:]
         sf = len(sig_flex) - len(wf); se = len(sig_ext) - len(we)
         socketio.emit("signal", {
-            "flexors":   [{"x": sf+j, "y": round(v, 4)} for j, v in enumerate(wf)],
-            "extensors": [{"x": se+j, "y": round(v, 4)} for j, v in enumerate(we)],
+            "flexors":   [{"x": sf+j, "y": round(v, 2)} for j, v in enumerate(wf)],
+            "extensors": [{"x": se+j, "y": round(v, 2)} for j, v in enumerate(we)],
+            "t_on":  T_ON_ABS,
+            "t_off": T_OFF_ABS,
         })
 
         log_ctr += 1
@@ -443,22 +436,22 @@ def run_worker(mode="simulated", live_opts=None):
                 "label":   "ACTIVE" if state_ else "REST",
                 "gesture": "" if state_ else "REST",
                 "color":   "#ffffff" if state_ else "#444444",
-                "act":     round(act, 4),
+                "act":     round(act, 2),
             })
 
-        # ── State machine (identical to ClassifierThread._process_sample) ──
+        # ── State machine ─────────────────────────────────────────────────
         if state_ == 0:
-            if act > T_ON:
+            if act > T_ON_ABS:
                 cnt_on += 1
                 if cnt_on >= N_ON:
-                    socketio.emit("state", {"label": "ACTIVE", "gesture": "", "color": "#ffffff", "act": round(act, 4)})
-                    socketio.emit("log", {"text": "▶  gesture start"})
+                    socketio.emit("state", {"label": "ACTIVE", "gesture": "", "color": "#ffffff", "act": round(act, 2)})
+                    socketio.emit("log",   {"text": "▶  gesture start"})
                     state_ = 1; gest_buf = []; votes = []; last_printed = ""; cnt_on = 0
             else:
                 cnt_on = 0
         else:
             gest_buf.append(filtered)
-            cnt_off = cnt_off + 1 if act < T_OFF else 0
+            cnt_off = cnt_off + 1 if act < T_OFF_ABS else 0
             gesture_end = (cnt_off >= N_OFF) or (len(gest_buf) >= max_g)
 
             if len(gest_buf) >= win_s:
@@ -473,7 +466,12 @@ def run_worker(mode="simulated", live_opts=None):
                     if v < len(GESTURE_CLASSES): vc[v] += 1
                 gname = GESTURE_CLASSES.get(int(np.argmax(vc)), "?")
                 col   = GESTURE_COLORS.get(gname, "#ffffff")
-                socketio.emit("state", {"label": "ACTIVE", "gesture": gname, "color": col, "act": round(act, 4)})
+                # Build vote breakdown for frontend
+                vote_names = [GESTURE_CLASSES.get(int(v), "?") for v in votes if v < len(GESTURE_CLASSES)]
+                socketio.emit("state", {
+                    "label": "ACTIVE", "gesture": gname, "color": col,
+                    "act": round(act, 2), "votes": vote_names,
+                })
                 if gname != last_printed:
                     socketio.emit("log", {"text": f"  → {gname}"})
                     last_printed = gname
@@ -486,19 +484,23 @@ def run_worker(mode="simulated", live_opts=None):
                         if v < len(GESTURE_CLASSES): vc[v] += 1
                     gname = GESTURE_CLASSES.get(int(np.argmax(vc)), "?")
                     col   = GESTURE_COLORS.get(gname, "#ffffff")
-                    socketio.emit("log", {"text": f"★  final: {gname}  ({len(votes)} votes)"})
-                    socketio.emit("state", {"label": "REST", "gesture": gname, "color": col, "act": round(act, 4)})
+                    vote_names = [GESTURE_CLASSES.get(int(v), "?") for v in votes if v < len(GESTURE_CLASSES)]
+                    socketio.emit("log",   {"text": f"★  final: {gname}  ({len(votes)} votes)"})
+                    socketio.emit("state", {
+                        "label": "REST", "gesture": gname, "color": col,
+                        "act": round(act, 2), "votes": vote_names,
+                    })
                 else:
-                    socketio.emit("log", {"text": "  (skipped — too short)"})
-                    socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": round(act, 4)})
+                    socketio.emit("log",   {"text": "  (skipped — too short)"})
+                    socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": round(act, 2)})
                 state_ = 0; cnt_off = 0; votes = []
 
     if mode == "live":
         socketio.emit("state", {"label": "STOPPED", "gesture": "—", "color": "#888888", "act": 0.0})
-        socketio.emit("log", {"text": "— live stream ended —"})
+        socketio.emit("log",   {"text": "— live stream ended —"})
     else:
         socketio.emit("state", {"label": "DONE ✓", "gesture": "DONE", "color": "#69ff47", "act": 0.0})
-        socketio.emit("log", {"text": "— finished —"})
+        socketio.emit("log",   {"text": "— finished —"})
 
     active_source  = None
     worker_running = False
@@ -532,12 +534,11 @@ def on_stop(_=None):
     if active_source:
         active_source.stop()
         active_source = None
-    socketio.emit("log", {"text": "Stopped by user."})
+    socketio.emit("log",  {"text": "Stopped by user."})
     socketio.emit("state", {"label": "STOPPED", "gesture": "—", "color": "#888888", "act": 0.0})
 
 @socketio.on("check_device")
 def on_check_device(data=None):
-    """Listen briefly to see if the Sessantaquattro+ connects."""
     data = data or {}
     host = data.get("host", "0.0.0.0")
     port = int(data.get("port", 45454))
@@ -569,7 +570,6 @@ def on_check_device(data=None):
 DEVICE_WEB_UI = "http://192.168.1.1"
 
 def _scrape_battery(url=DEVICE_WEB_UI):
-    """Fetch the Sessantaquattro+ web UI and extract battery percentage."""
     import re
     from urllib.request import urlopen, Request
     from urllib.error import URLError
@@ -600,7 +600,7 @@ def index():
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ── REST OF API ROUTES (unchanged) ───────────────────────────────────────────
+# ── API ROUTES ────────────────────────────────────────────────────────────────
 # ═════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/testing/gestures/<int:user_id>")
@@ -659,7 +659,6 @@ def record_test_trial():
     was_correct = data.get("wasCorrect");  was_skipped = data.get("wasSkipped", False)
     retry_count = data.get("retryCount", 0); trial_number = data.get("trialNumber", 1)
 
-    # Determine display_order for this trial within the testing session
     display_order = TestingTrial.query.filter_by(session_id=session_id).count() + 1
 
     trial = TestingTrial(
@@ -823,11 +822,11 @@ def dashboard(user_id):
             "needsRetraining": ug.needs_retraining, "isUnlocked": ug.is_unlocked,
             "isEnabled": ug.is_enabled,
         })
-    unlocked       = [g for g in gesture_stats if g["isUnlocked"]]
-    total_correct  = sum(g["correct"]   for g in unlocked)
-    total_incorrect= sum(g["incorrect"] for g in unlocked)
-    total_preds    = total_correct + total_incorrect
-    overall_acc    = round(total_correct / total_preds * 100, 1) if total_preds > 0 else 0.0
+    unlocked        = [g for g in gesture_stats if g["isUnlocked"]]
+    total_correct   = sum(g["correct"]    for g in unlocked)
+    total_incorrect = sum(g["incorrect"]  for g in unlocked)
+    total_preds     = total_correct + total_incorrect
+    overall_acc     = round(total_correct / total_preds * 100, 1) if total_preds > 0 else 0.0
     gestures_trained = sum(1 for g in unlocked if g["totalTrained"] > 0)
     recent = Session.query.filter_by(user_id=user_id).order_by(Session.started_at.desc()).limit(5).all()
     recent_sessions = [{"id": s.id, "type": s.session_type, "status": s.status,
@@ -861,7 +860,7 @@ def training_gestures(user_id):
     return jsonify({"gestures": result})
 
 
-# ── Training data collection (unchanged from previous version) ────────────────
+# ── Training data collection ──────────────────────────────────────────────────
 GESTURE_S       = 3.0
 REST_S          = 3.0
 INITIAL_REST_S  = 6.0
@@ -884,13 +883,14 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
             db_gestures = Gesture.query.all()
 
     gesture_names = [g.gesture_name for g in db_gestures] or list(GESTURE_CLASSES.values())
+
     available_time = session_minutes * 60 - INITIAL_REST_S
     reps_per = max(1, int(available_time / (GESTURE_S + REST_S)) // len(gesture_names))
     sequence = gesture_names * reps_per
     random.shuffle(sequence)
     total = len(sequence)
 
-    socketio.emit("train_log", {"text": f"Collecting {total} gestures"})
+    socketio.emit("train_log",      {"text": f"Collecting {total} gestures"})
     socketio.emit("train_sequence", {"gestures": sequence})
 
     if mode == "live":
@@ -900,7 +900,6 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
             fsamp=int(live_opts.get("fsamp", S64_FSAMP)),
             nch=int(live_opts.get("nch", S64_NCH)),
             emg_channels=int(live_opts.get("emg_channels", 64)),
-            calibration_s=float(live_opts.get("calibration_s", REST_CALIB_S)),
             on_log=lambda msg: socketio.emit("train_log", {"text": msg}),
         )
     else:
@@ -953,7 +952,7 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
         if phase_idx >= len(phases): break
         p = phases[phase_idx]
         if p[2] == "gesture": current_samples.append(raw.copy())
-        elapsed = (sample_i - p[0]) / Fs
+        elapsed   = (sample_i - p[0]) / Fs
         remaining = (p[1]-p[0])/Fs - elapsed
         cd = max(int(remaining)+1, 0)
         if cd != last_countdown:
@@ -1042,7 +1041,7 @@ def on_train_pause(_=None):
     global training_paused
     training_paused = True
     if training_source: training_source.pause()
-    socketio.emit("train_log", {"text": "⏸ Paused."})
+    socketio.emit("train_log",   {"text": "⏸ Paused."})
     socketio.emit("train_paused", {"paused": True})
 
 @socketio.on("train_resume")
@@ -1050,7 +1049,7 @@ def on_train_resume(_=None):
     global training_paused
     training_paused = False
     if training_source: training_source.resume()
-    socketio.emit("train_log", {"text": "▶ Resumed."})
+    socketio.emit("train_log",   {"text": "▶ Resumed."})
     socketio.emit("train_paused", {"paused": False})
 
 @socketio.on("train_stop")
@@ -1059,7 +1058,7 @@ def on_train_stop(_=None):
     training_running = False; training_paused = False
     if training_source:
         training_source.stop(); training_source = None
-    socketio.emit("train_log", {"text": "Training stopped."})
+    socketio.emit("train_log",  {"text": "Training stopped."})
     socketio.emit("train_done", {"filename": None, "count": 0})
 
 
