@@ -265,8 +265,20 @@ function FlappyBallGame({
       const tOn_ = l.tOn || T_ON_DEFAULT;
       const nextPipe = g.pipes.find(p => !p.evaluated);
 
+      // Find the last evaluated pipe whose right edge the ball hasn't fully cleared yet
+      // Use generous padding so the ball visually exits the pipe before changing course
+      const CLEAR_PAD = BR + 12;
+      const clearingPipe = [...g.pipes].reverse().find(
+        p => p.evaluated && (p.x + PW) > (BX - CLEAR_PAD)
+      );
+
       let targetY = BALL_GROUND_Y;
-      if (nextPipe?.outcome === 'pass') {
+      if (clearingPipe?.outcome === 'pass') {
+        // Keep the ball at gap center until it fully clears the pipe
+        targetY = gapCenterY(clearingPipe.gapTop);
+      } else if (clearingPipe?.outcome === 'fail') {
+        targetY = missYForPipe(clearingPipe);
+      } else if (nextPipe?.outcome === 'pass') {
         targetY = gapCenterY(nextPipe.gapTop);
       } else if (nextPipe?.outcome === 'fail') {
         targetY = missYForPipe(nextPipe);
@@ -275,7 +287,10 @@ function FlappyBallGame({
       }
 
       targetY = clamp(targetY, MARGIN + BR, GH - MARGIN - BR);
-      g.ballY += 0.11 * (targetY - g.ballY);
+      // Faster easing when the ball is near/inside a pipe so it reaches the gap in time
+      const nearPipe = nextPipe && (nextPipe.x - BX) < PIPE_SPACING * 0.35;
+      const ease = (clearingPipe || nearPipe) ? 0.22 : 0.11;
+      g.ballY += ease * (targetY - g.ballY);
       g.ballY = clamp(g.ballY, MARGIN + BR, GH - MARGIN - BR);
 
       if (!l.paused) {
