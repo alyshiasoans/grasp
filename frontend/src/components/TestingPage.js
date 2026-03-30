@@ -428,6 +428,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const [gesturePool,    setGesturePool]    = useState([]);
   const [currentGesture, setCurrentGesture] = useState(null);
   const [phase,          setPhase]          = useState('setup');
+  const [countdown,      setCountdown]      = useState(null);
   const [retryCount,     setRetryCount]     = useState(0);
   const [gamePaused,     setGamePaused]     = useState(false);
 
@@ -756,7 +757,22 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
       setLogs(['▶  session started']);
       setPrediction(null); setVotes([]); setPendingResult(null);
       setActHistory([]); setActivation(0);
-      setPhase('prompting'); setGamePaused(false);
+      setGamePaused(false);
+
+      // Countdown 3 → 2 → 1 → go
+      setPhase('countdown');
+      setCountdown(3);
+      let count = 3;
+      const cdInterval = setInterval(() => {
+        count--;
+        if (count > 0) {
+          setCountdown(count);
+        } else {
+          clearInterval(cdInterval);
+          setCountdown(null);
+          setPhase('prompting');
+        }
+      }, 1000);
 
       if (socket && mode === 'live') socket.emit('start', { mode:'live', liveOpts });
     } catch (e) {
@@ -881,6 +897,25 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
           disabled={mode==='live' && (!connected || eligibleGs.length===0)}>
           ▶ Start
         </button>
+      </div>
+    </div>
+  );
+
+  // ═════════════════════════════════════════════════════════════════════════
+  // ── COUNTDOWN ─────────────────────────────────────────────────────────────
+  // ═════════════════════════════════════════════════════════════════════════
+  if (phase === 'countdown') return (
+    <div className="testing-page" style={{ maxWidth:820, margin:'0 auto', padding:'0 0 40px',
+      display:'flex', alignItems:'center', justifyContent:'center', minHeight:400 }}>
+      <div style={{ textAlign:'center' }}>
+        <div style={{ fontSize:'1rem', color:'#888', fontFamily:'monospace',
+          letterSpacing:3, marginBottom:24 }}>GAME STARTING IN</div>
+        <div style={{
+          fontSize:'6rem', fontWeight:900, fontFamily:'monospace',
+          color:'#00e5ff', textShadow:'0 0 40px #00e5ff66, 0 0 80px #00e5ff22',
+          animation:'pulse 1s ease-in-out infinite',
+          lineHeight:1,
+        }}>{countdown}</div>
       </div>
     </div>
   );
