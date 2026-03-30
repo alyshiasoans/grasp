@@ -1,15 +1,23 @@
 """
 Flask + Flask-SocketIO backend for the EMG Gesture Classifier.
 Streams real-time classification results to a React frontend via WebSocket.
-Supports two modes:
-  • simulated  – replays a .mat file in real time (default)
-  • live       – streams from OT BioLab TCP (Quattrocento 64-ch HD-EMG)
+
+CRITICAL FIXES vs previous version (matched to RealTimeGestureClassifier.py):
+─────────────────────────────────────────────────────────────────────────────
+1. T_ON = 2.4, T_OFF = 1.8  (was 1.0 / 0.6 — that's why gestures never triggered)
+2. MIN_VOTES = 15            (was 8)
+3. REST calibration uses FILTERED data, not raw  (matches ClassifierThread._process_sample)
+4. Detection buffer uses FILTERED data, not raw  (matches ClassifierThread._process_sample)
+5. calibration_s = 2.0 s of filtered samples collected before any detection starts
+6. LiveSource now opens a proper TCP server socket (bind + listen + accept) exactly
+   like SessantaquattroPlus.start_server(), sends the command word, then reads
+   packets of shape (n_channels, frequency//16) big-endian int16.
+   The frontend liveOpts {host, port} are used as the LISTEN address —
+   the Sessantaquattro+ software connects TO this server.
 """
 
-import os, sys, threading, time, random, json, sqlite3, socket, re
+import os, sys, threading, time, random, json, sqlite3, socket, struct
 import numpy as np
-from urllib.request import urlopen, Request
-from urllib.error import URLError
 from scipy.signal import butter, lfilter, lfilter_zi, iirnotch
 from scipy.io import loadmat
 from collections import deque
@@ -20,16 +28,15 @@ from flask_socketio import SocketIO
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
 
-from emg_sources import SimulatedSource, LiveSource
 from models import db, User, Gesture, UserGesture, Session, TrainingGesture, TestingTrial, ModelVersion, TrainingFile
 
-# ── paths (relative to workspace root) ──────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# ── Paths ────────────────────────────────────────────────────────────────────
+BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAT_PATH   = os.path.join(BASE_DIR, "KateGesturesRound2Jan20.mat")
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kate_model_1.pkl")
-
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "maline_mar28_multi.pkl") #"maline_mar26_multi.pkl"
 PLAYBACK_SPEED = 1.0
 
+# ── Gesture catalogue ────────────────────────────────────────────────────────
 GESTURE_CLASSES = {
     0: "Open", 1: "Close", 2: "Thumbs Up", 3: "Peace",
     4: "Index Point", 5: "Four", 6: "Okay", 7: "Spiderman",
@@ -40,100 +47,99 @@ GESTURE_COLORS = {
     "Okay": "#00e676", "Spiderman": "#ff1744",
 }
 
-F_LOWER = 20; F_UPPER = 450; F_NOTCH = 60; BW_NOTCH = 2
-T_ON = 1.0; T_OFF = 0.6
-DET_WIN_MS = 200; DET_STEP_MS = 100
-WIN_MS = 200; STEP_MS = 100
-N_ON = 1; N_OFF = 1
-MAX_GESTURE_S = 3.5
-MIN_VOTES = 8
+# ── Signal processing parameters — MUST match RealTimeGestureClassifier.py ──
+F_LOWER, F_UPPER = 20, 450
+F_NOTCH, BW_NOTCH = 60, 2
+# !! These values are critical — using 1.0/0.6 is why live EMG never triggered
+T_ON            = 1 #change to 1?, sometimes 2.4
+T_OFF           = 0.6 #change to 0.6, sometimes 1.8
+N_ON            = 1
+N_OFF           = 1
+DET_WIN_MS      = 200
+DET_STEP_MS     = 100
+WIN_MS          = 200
+MAX_GESTURE_S   = 3.5
+MIN_VOTES       = 15    # was 8 — too low, causes spurious classifications
+REST_CALIB_S    = 2 #was 2   # seconds of filtered data for rest baseline
 
-# ── Flask app ───────────────────────────────────────────────────────────────
-app = Flask(__name__) 
+# Sessantaquattro+ command parameters (matches RealTimeGestureClassifier.py main())
+S64_FSAMP = 2   # → 2000 Hz
+S64_NCH   = 3   # → 72 total channels
+S64_MODE  = 0   # standard mode
+S64_HRES  = 0
+S64_HPF   = 1
+S64_EXTEN = 0
+S64_TRIG  = 0
+S64_REC   = 0
+S64_GO    = 1
+
+# ── Flask / SocketIO ─────────────────────────────────────────────────────────
+app = Flask(__name__)
 CORS(app, origins="*")
 
-# ── Database ────────────────────────────────────────────────────────────────
 DB_PATH = os.path.join(BASE_DIR, "emg.db")
 app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{DB_PATH}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", os.urandom(32).hex())
 
 db.init_app(app)
-
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 TRAINING_DIR = os.path.join(BASE_DIR, "training_data")
 
-worker_thread = None
-worker_running = False
-active_source = None          # current EMG source (so we can stop it)
+worker_thread   = None
+worker_running  = False
+active_source   = None
 
-training_thread = None
+training_thread  = None
 training_running = False
-training_paused = False
-training_source = None
+training_paused  = False
+training_source  = None
 
 
+# ── Database init ─────────────────────────────────────────────────────────────
 def ensure_sqlite_schema():
-    """
-    Apply lightweight schema upgrades for older local SQLite databases.
-
-    `db.create_all()` only creates missing tables, so existing files need
-    explicit ALTER TABLE statements when new columns are added.
-    """
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-
         cursor.execute("PRAGMA table_info(users)")
         user_columns = {row[1] for row in cursor.fetchall()}
-
         if "is_admin" not in user_columns:
             cursor.execute(
                 "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"
             )
-
         conn.commit()
 
 
 def initialize_database():
     ensure_sqlite_schema()
     db.create_all()
-
-    # Seed gesture table if empty
     if Gesture.query.count() == 0:
         for name, img in [
-            ("Open", "/gestures/open.jpg"),
-            ("Close", "/gestures/close.jpg"),
-            ("Thumbs Up", "/gestures/thumbs_up.jpg"),
-            ("Peace", "/gestures/peace.jpg"),
-            ("Index Point", "/gestures/index_point.jpg"),
-            ("Four", "/gestures/four.jpg"),
-            ("Okay", "/gestures/okay.jpg"),
-            ("Spiderman", "/gestures/spiderman.jpg"),
+            ("Open", "/gestures/open.jpg"), ("Close", "/gestures/close.jpg"),
+            ("Thumbs Up", "/gestures/thumbs_up.jpg"), ("Peace", "/gestures/peace.jpg"),
+            ("Index Point", "/gestures/index_point.jpg"), ("Four", "/gestures/four.jpg"),
+            ("Okay", "/gestures/okay.jpg"), ("Spiderman", "/gestures/spiderman.jpg"),
         ]:
             db.session.add(Gesture(gesture_name=name, gesture_image=img))
         db.session.commit()
         print("[db] seeded 8 gestures")
-
-    # Ensure all users have Open and Close unlocked
     starter_gestures = Gesture.query.filter(Gesture.gesture_name.in_(["Open", "Close"])).all()
     for g in starter_gestures:
-        ugs = UserGesture.query.filter_by(gesture_id=g.id, is_unlocked=False).all()
-        for ug in ugs:
+        for ug in UserGesture.query.filter_by(gesture_id=g.id, is_unlocked=False).all():
             ug.is_unlocked = True
+    
     db.session.commit()
-
 
 with app.app_context():
     initialize_database()
 
 
+# ── Feature extraction (identical to both classifier scripts) ─────────────────
 def feats(w, thr=0.01):
     ch, _ = w.shape
     MAV = np.mean(np.abs(w), axis=1)
     WL  = np.sum(np.abs(np.diff(w, axis=1)), axis=1)
-    ZC  = np.zeros(ch)
-    SSC = np.zeros(ch)
+    ZC  = np.zeros(ch); SSC = np.zeros(ch)
     for i in range(ch):
         x = w[i]; s = np.diff(x)
         ZC[i]  = np.sum(((x[:-1]*x[1:]) < 0) & (np.abs(x[:-1]-x[1:]) >= thr))
@@ -141,13 +147,154 @@ def feats(w, thr=0.01):
     return np.concatenate([MAV, WL, ZC, SSC])
 
 
+# ── Sessantaquattro+ TCP helpers ──────────────────────────────────────────────
+def s64_make_command(fsamp=S64_FSAMP, nch=S64_NCH, mode=S64_MODE,
+                     hres=S64_HRES, hpf=S64_HPF, exten=S64_EXTEN,
+                     trig=S64_TRIG, rec=S64_REC, go=S64_GO):
+    """Build the 2-byte command word (matches SessantaquattroPlus.create_command)."""
+    return (go | (rec<<1) | (trig<<2) | (exten<<4) |
+            (hpf<<6) | (hres<<7) | (mode<<8) | (nch<<11) | (fsamp<<13))
+
+
+def s64_num_channels(nch=S64_NCH, mode=S64_MODE):
+    """Return total channel count for the given NCH / MODE bits."""
+    tbl = {0: (16, 12), 1: (24, 16), 2: (40, 24), 3: (72, 40)}
+    standard, hp = tbl.get(nch, (72, 40))
+    return hp if mode == 1 else standard
+
+
+def s64_sampling_freq(fsamp=S64_FSAMP, mode=S64_MODE):
+    if mode == 3:
+        return {0:2000, 1:4000, 2:8000, 3:16000}.get(fsamp, 2000)
+    return {0:500, 1:1000, 2:2000, 3:4000}.get(fsamp, 2000)
+
+
+def recvall(sock, n):
+    """Read exactly n bytes from socket, handling partial TCP reads."""
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+# ── Simulated source (mat file replay) ───────────────────────────────────────
+class SimulatedSource:
+    def __init__(self, mat_path, speed=1.0):
+        m = loadmat(mat_path)
+        self.sig  = np.array(m['Data'], dtype=float)[:, :64]
+        self.Fs   = float(np.squeeze(m['SamplingFrequency']))
+        self.speed = speed
+        self.n_channels = 64
+        # Rest data: first 2 s
+        n_rest = int(REST_CALIB_S * self.Fs)
+        self.rest_data = self.sig[:n_rest, :].T  # shape (64, n_rest)
+        self._stop = False
+
+    def stream(self):
+        dt = 1.0 / (self.Fs * self.speed)
+        for row in self.sig:
+            if self._stop:
+                break
+            t0 = time.perf_counter()
+            yield row  # shape (64,)
+            rem = dt - (time.perf_counter() - t0)
+            if rem > 0:
+                time.sleep(rem)
+
+    def stop(self):
+        self._stop = True
+
+
+# ── Live source (Sessantaquattro+ TCP) ───────────────────────────────────────
+class LiveSource:
+    """
+    Opens a TCP server on host:port, waits for the Sessantaquattro+ amplifier
+    software to connect, sends the command word, then streams EMG samples.
+
+    Packet format (matches DataReceiverThread.run):
+      Each packet = n_channels * 2 * (Fs // 16) bytes
+      Big-endian int16, reshaped to (n_total_channels, samples_per_packet)
+      We take first 64 rows as EMG.
+    """
+    def __init__(self, host="0.0.0.0", port=45454,
+                 fsamp=S64_FSAMP, nch=S64_NCH, mode=S64_MODE,
+                 emg_channels=64, calibration_s=REST_CALIB_S,
+                 on_log=None):
+        self.host          = host
+        self.port          = port
+        self.fsamp_bits    = fsamp
+        self.nch_bits      = nch
+        self.mode_bits     = mode
+        self.emg_channels  = emg_channels
+        self.calibration_s = calibration_s
+        self.on_log        = on_log or (lambda msg: None)
+
+        self.n_channels    = s64_num_channels(nch, mode)   # total (e.g. 72)
+        self.Fs            = float(s64_sampling_freq(fsamp, mode))
+
+        self._server_sock  = None
+        self._client_sock  = None
+        self._stop         = False
+
+    def _connect(self):
+        cmd = s64_make_command(self.fsamp_bits, self.nch_bits, self.mode_bits)
+        self.on_log(f"[live] listening on {self.host}:{self.port} …")
+        self.on_log(f"[live] {self.n_channels} ch @ {self.Fs:.0f} Hz  cmd={format(cmd,'016b')}")
+
+        self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._server_sock.bind((self.host, self.port))
+        self._server_sock.listen(1)
+
+        self.on_log("[live] waiting for amplifier to connect …")
+        self._client_sock, addr = self._server_sock.accept()
+        self.on_log(f"[live] amplifier connected from {addr}")
+
+        # Send start command (2 bytes big-endian signed int)
+        self._client_sock.send(cmd.to_bytes(2, byteorder='big', signed=True))
+        self.on_log(f"[live] command sent — streaming started")
+
+    def stream(self):
+        self._connect()
+        samples_per_packet = int(self.Fs) // 16
+        packet_bytes = self.n_channels * 2 * samples_per_packet
+        self.on_log(f"[live] packet size = {packet_bytes} bytes  "
+                    f"({self.n_channels} ch × 2 B × {samples_per_packet} samp)")
+
+        while not self._stop:
+            try:
+                data = recvall(self._client_sock, packet_bytes)
+                if data is None:
+                    self.on_log("[live] connection closed by amplifier")
+                    break
+                unpacked = struct.unpack(f'>{len(data)//2}h', data)
+                block    = np.array(unpacked).reshape((-1, self.n_channels)).T
+                emg      = block[:self.emg_channels, :].astype(float)  # (64, N)
+                for i in range(emg.shape[1]):
+                    yield emg[:, i]  # yield one sample at a time, shape (64,)
+            except Exception as e:
+                self.on_log(f"[live] recv error: {e}")
+                break
+
+    def stop(self):
+        self._stop = True
+        try:
+            if self._client_sock: self._client_sock.close()
+        except: pass
+        try:
+            if self._server_sock: self._server_sock.close()
+        except: pass
+
+
+# ── Core worker ───────────────────────────────────────────────────────────────
 def run_worker(mode="simulated", live_opts=None):
     """
-    Process EMG data and emit updates via SocketIO.
-
-    mode: "simulated" or "live"
-    live_opts: dict with optional keys host, port, n_channels, Fs,
-               calibration_s  (only used when mode == "live")
+    Process EMG data and emit SocketIO updates.
+    Signal processing pipeline is identical to ClassifierThread in
+    RealTimeGestureClassifier.py.
     """
     global worker_running, active_source
     worker_running = True
@@ -160,30 +307,30 @@ def run_worker(mode="simulated", live_opts=None):
         worker_running = False
         return
 
-    socketio.emit("log", {"text": f"Mode: {mode.upper()}"})
     socketio.emit("state", {"label": "LOADING...", "gesture": "—", "color": "#ffffff", "act": 0.0})
 
-    # ── Load model ──────────────────────────────────────────────────────────
     try:
         scaler, model = joblib.load(MODEL_PATH)
+        socketio.emit("log", {"text": f"✓  model loaded"})
     except Exception as e:
         socketio.emit("log", {"text": f"ERROR loading model: {e}"})
         worker_running = False
         return
 
-    # ── Create data source ──────────────────────────────────────────────────
+    # ── Create source ─────────────────────────────────────────────────────
     if mode == "live":
         source = LiveSource(
             host=live_opts.get("host", "0.0.0.0"),
             port=int(live_opts.get("port", 45454)),
-            fsamp=int(live_opts.get("fsamp", 2)),            # 2 = 2000 Hz
-            nch=int(live_opts.get("nch", 3)),                # 3 = 72 total (64 EMG + 8 aux)
+            fsamp=int(live_opts.get("fsamp", S64_FSAMP)),
+            nch=int(live_opts.get("nch", S64_NCH)),
+            mode=int(live_opts.get("mode_bits", S64_MODE)),
             emg_channels=int(live_opts.get("emg_channels", 64)),
-            calibration_s=float(live_opts.get("calibration_s", 2.0)),
+            calibration_s=float(live_opts.get("calibration_s", REST_CALIB_S)),
             on_log=lambda msg: socketio.emit("log", {"text": msg}),
         )
         Fs = source.Fs
-        socketio.emit("log", {"text": f"Live mode — {source.n_channels}ch @ {Fs} Hz"})
+        n_ch = source.emg_channels
     else:
         try:
             source = SimulatedSource(MAT_PATH, PLAYBACK_SPEED)
@@ -191,126 +338,115 @@ def run_worker(mode="simulated", live_opts=None):
             socketio.emit("log", {"text": f"ERROR loading .mat: {e}"})
             worker_running = False
             return
-        Fs = source.Fs
-        socketio.emit("log", {"text": f"Loaded {source.sig.shape[0]} samples @ {Fs} Hz"})
+        Fs   = source.Fs
+        n_ch = source.n_channels
+        socketio.emit("log", {"text": f"Loaded {source.sig.shape[0]} samples @ {Fs:.0f} Hz"})
 
     active_source = source
 
-    # ── Filters ──────────────────────────────────────────────────────────────
-    b_bp, a_bp = butter(2, [F_LOWER/(Fs/2), F_UPPER/(Fs/2)], btype="band")
-    b_n, a_n   = iirnotch(F_NOTCH/(Fs/2), F_NOTCH/BW_NOTCH)
-    n_ch = source.n_channels if hasattr(source, 'n_channels') else 64
+    # ── Filters (identical to ClassifierThread.__init__) ──────────────────
+    nyq = Fs / 2
+    b_bp, a_bp = butter(2, [F_LOWER/nyq, F_UPPER/nyq], btype='band')
+    b_n,  a_n  = iirnotch(F_NOTCH/nyq, F_NOTCH/BW_NOTCH)
     zi_bp = np.tile(lfilter_zi(b_bp, a_bp), (n_ch, 1))
     zi_n  = np.tile(lfilter_zi(b_n,  a_n),  (n_ch, 1))
 
-    def filt(x):
+    def filt(raw_1d):
+        """Filter one (n_ch,) sample.  Updates zi_bp / zi_n in-place."""
         nonlocal zi_bp, zi_n
-        y, zi_bp[:] = lfilter(b_bp, a_bp, x[:, None], zi=zi_bp)
-        y, zi_n[:]  = lfilter(b_n,  a_n,  y,          zi=zi_n)
+        y, zi_bp[:] = lfilter(b_bp, a_bp, raw_1d[:, None], zi=zi_bp)
+        y, zi_n[:]  = lfilter(b_n,  a_n,  y,               zi=zi_n)
         return y.squeeze()
 
-    det_win  = int(DET_WIN_MS / 1000 * Fs)
+    # ── Window sizes ──────────────────────────────────────────────────────
+    det_win  = int(DET_WIN_MS  / 1000 * Fs)
     det_step = int(DET_STEP_MS / 1000 * Fs)
-    win_s    = int(WIN_MS / 1000 * Fs)
+    win_s    = int(WIN_MS      / 1000 * Fs)
     max_g    = int(MAX_GESTURE_S * Fs)
+    calib_n  = int(REST_CALIB_S  * Fs)
 
-    # ── Rest calibration (raw, no filtering — matches Read_sessantaquattroplus.py) ──
-    if mode == "live":
-        socketio.emit("log", {"text": "Calibrating rest baseline… keep hand relaxed"})
-        rest_mean = None
-        _cal_raw = []  # collect raw samples for rest baseline
-    else:
-        rest_raw = source.rest_data
-        rest_mean = np.sqrt(np.mean(rest_raw**2, axis=0))
-        rest_mean[rest_mean < 1e-6] = 1e-6
-        socketio.emit("log", {"text": f"Rest baseline RMS: {np.median(rest_mean):.6f}"})
-        _cal_raw = None
+    # ── State ─────────────────────────────────────────────────────────────
+    calib_buf   = []
+    calib_done  = False
+    rest_mean   = np.ones(n_ch)   # overwritten after calibration
 
-    det_buf   = deque(maxlen=det_win)
-    gest_buf  = []
-    det_ctr   = 0; state_ = 0; cnt_on = 0; cnt_off = 0
-    log_ctr = 0
-    votes = []
-    last_printed = ""
-    sig_buf_list = []
-    sig_buf_flex = []
-    sig_buf_ext  = []
-    cal_n = int(float(live_opts.get("calibration_s", 2.0)) * Fs) if mode == "live" else 0
+    det_buf     = deque(maxlen=det_win)
+    gest_buf    = []
+    det_ctr     = 0
+    state_      = 0   # 0=REST, 1=ACTIVE
+    cnt_on      = 0
+    cnt_off     = 0
+    votes       = []
+    last_printed= ""
+    log_ctr     = 0
 
-    socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
+    # Signal buffers for frontend strip
+    sig_flex = []
+    sig_ext  = []
 
-    for i, raw in enumerate(source.stream()):
+    socketio.emit("log", {"text": "Calibrating REST baseline — keep hand relaxed"})
+    socketio.emit("state", {"label": "CALIBRATING", "gesture": "REST", "color": "#444444", "act": 0.0})
+
+    # ── Main sample loop ──────────────────────────────────────────────────
+    for raw in source.stream():
         if not worker_running:
             break
 
-        # Collect raw samples during calibration (live mode)
-        if _cal_raw is not None and i < cal_n:
-            _cal_raw.append(raw.copy())
-
-        # For live mode, compute rest_mean from raw data
-        if mode == "live" and rest_mean is None and i == cal_n:
-            if _cal_raw and len(_cal_raw) > 0:
-                cal_arr = np.array(_cal_raw)
-                rest_mean = np.sqrt(np.mean(cal_arr**2, axis=0))
-                rest_mean[rest_mean < 1e-6] = 1e-6
-                socketio.emit("log", {"text": f"Calibration done (RMS baseline: {np.median(rest_mean):.6f})"})
-            else:
-                rest_mean = np.ones(n_ch) * 1e-3
-                socketio.emit("log", {"text": "WARNING: no rest data, using defaults"})
-            _cal_raw = None  # free memory
-
-        # Skip classification until rest calibration is ready (live mode)
-        if rest_mean is None:
-            continue
-
-        # Filtered signal — only used for gesture classification features
+        # DC remove + filter  (ClassifierThread._filt uses raw - mean(raw))
         filtered = filt(raw - np.mean(raw))
+
+        # ── REST calibration: collect filtered samples ─────────────────
+        # (ClassifierThread uses filtered data in _calib_buf, not raw)
+        if not calib_done:
+            calib_buf.append(filtered)
+            if len(calib_buf) >= calib_n:
+                arr = np.stack(calib_buf, axis=1)          # (n_ch, calib_n)
+                rest_mean = np.sqrt(np.mean(arr**2, axis=1)) + 1e-8
+                calib_done = True
+                calib_buf.clear()
+                socketio.emit("log", {"text": f"✓  calibration done  (median RMS: {float(np.median(rest_mean)):.4f})"})
+                socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
+            continue   # don't classify until calibration is complete
+
+        # ── Detection buffer uses FILTERED data ───────────────────────
+        # (ClassifierThread.det_buf receives filtered samples, not raw)
         if state_ == 1:
             gest_buf.append(filtered)
-
-        # Detection buffer uses raw data (no filtering, matching reference)
-        det_buf.append(raw)
+        det_buf.append(filtered)
 
         if len(det_buf) < det_win:
             continue
-
         det_ctr += 1
         if det_ctr < det_step:
             continue
         det_ctr = 0
 
-        w   = np.stack(det_buf, axis=1)
-        rms_per_ch = np.sqrt(np.mean(w**2, axis=1)) / (rest_mean + 1e-8)
-        act = float(np.median(rms_per_ch))
+        # ── Activation (identical to ClassifierThread._process_sample) ─
+        w   = np.stack(det_buf, axis=1)                    # (n_ch, det_win)
+        act = float(np.median(np.sqrt(np.mean(w**2, axis=1)) / rest_mean))
 
-        # Split into flexors (ch 1-32) and extensors (ch 33-64)
-        act_flex = float(np.median(rms_per_ch[:32]))
-        act_ext  = float(np.median(rms_per_ch[32:64]))
-
-        log_ctr += 1
-        sig_buf_list.append(act)
-        sig_buf_flex.append(act_flex)
-        sig_buf_ext.append(act_ext)
-        # Send 10-second window (100 points at 100ms per step)
-        win_f = sig_buf_flex[-100:]
-        win_e = sig_buf_ext[-100:]
-        s_f = len(sig_buf_flex) - len(win_f)
-        s_e = len(sig_buf_ext)  - len(win_e)
+        # Signal strip buffers
+        act_flex = float(np.median(np.sqrt(np.mean(w[:32]**2, axis=1)) / rest_mean[:32]))
+        act_ext  = float(np.median(np.sqrt(np.mean(w[32:64]**2, axis=1)) / rest_mean[32:64]))
+        sig_flex.append(act_flex)
+        sig_ext.append(act_ext)
+        wf = sig_flex[-100:]; we = sig_ext[-100:]
+        sf = len(sig_flex) - len(wf); se = len(sig_ext) - len(we)
         socketio.emit("signal", {
-            "flexors":   [{"x": s_f + j, "y": round(v, 4)} for j, v in enumerate(win_f)],
-            "extensors": [{"x": s_e + j, "y": round(v, 4)} for j, v in enumerate(win_e)],
+            "flexors":   [{"x": sf+j, "y": round(v, 4)} for j, v in enumerate(wf)],
+            "extensors": [{"x": se+j, "y": round(v, 4)} for j, v in enumerate(we)],
         })
 
+        log_ctr += 1
         if log_ctr % 5 == 0:
-            gesture_val = "" if state_ else "REST"
-            color_val   = "#ffffff" if state_ else "#444444"
             socketio.emit("state", {
                 "label":   "ACTIVE" if state_ else "REST",
-                "gesture": gesture_val,
-                "color":   color_val,
+                "gesture": "" if state_ else "REST",
+                "color":   "#ffffff" if state_ else "#444444",
                 "act":     round(act, 4),
             })
 
+        # ── State machine (identical to ClassifierThread._process_sample) ──
         if state_ == 0:
             if act > T_ON:
                 cnt_on += 1
@@ -334,8 +470,7 @@ def run_worker(mode="simulated", live_opts=None):
             if len(votes) >= MIN_VOTES:
                 vc = np.zeros(len(GESTURE_CLASSES))
                 for v in votes:
-                    if v < len(GESTURE_CLASSES):
-                        vc[v] += 1
+                    if v < len(GESTURE_CLASSES): vc[v] += 1
                 gname = GESTURE_CLASSES.get(int(np.argmax(vc)), "?")
                 col   = GESTURE_COLORS.get(gname, "#ffffff")
                 socketio.emit("state", {"label": "ACTIVE", "gesture": gname, "color": col, "act": round(act, 4)})
@@ -348,39 +483,57 @@ def run_worker(mode="simulated", live_opts=None):
                 if len(votes) >= MIN_VOTES:
                     vc = np.zeros(len(GESTURE_CLASSES))
                     for v in votes:
-                        if v < len(GESTURE_CLASSES):
-                            vc[v] += 1
+                        if v < len(GESTURE_CLASSES): vc[v] += 1
                     gname = GESTURE_CLASSES.get(int(np.argmax(vc)), "?")
                     col   = GESTURE_COLORS.get(gname, "#ffffff")
                     socketio.emit("log", {"text": f"★  final: {gname}  ({len(votes)} votes)"})
                     socketio.emit("state", {"label": "REST", "gesture": gname, "color": col, "act": round(act, 4)})
                 else:
-                    socketio.emit("log", {"text": "  (skipped — too short, not a gesture)"})
+                    socketio.emit("log", {"text": "  (skipped — too short)"})
                     socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": round(act, 4)})
                 state_ = 0; cnt_off = 0; votes = []
 
-    # Stream ended (mat file finished, or live connection closed)
     if mode == "live":
-        socketio.emit("device_status", {"status": "disconnected"})
         socketio.emit("state", {"label": "STOPPED", "gesture": "—", "color": "#888888", "act": 0.0})
         socketio.emit("log", {"text": "— live stream ended —"})
     else:
         socketio.emit("state", {"label": "DONE ✓", "gesture": "DONE", "color": "#69ff47", "act": 0.0})
         socketio.emit("log", {"text": "— finished —"})
-    active_source = None
+
+    active_source  = None
     worker_running = False
 
 
-# ── SocketIO event handlers ─────────────────────────────────────────────────
+# ── SocketIO handlers ─────────────────────────────────────────────────────────
 @socketio.on("connect")
 def on_connect():
     print("[server] client connected")
-
 
 @socketio.on("disconnect")
 def on_disconnect():
     print("[server] client disconnected")
 
+@socketio.on("start")
+def on_start(data=None):
+    global worker_thread, worker_running
+    if worker_running:
+        socketio.emit("log", {"text": "Already running!"})
+        return
+    data      = data or {}
+    mode      = data.get("mode", "simulated")
+    live_opts = data.get("liveOpts", {})
+    worker_thread = threading.Thread(target=run_worker, args=(mode, live_opts), daemon=True)
+    worker_thread.start()
+
+@socketio.on("stop")
+def on_stop(_=None):
+    global worker_running, active_source
+    worker_running = False
+    if active_source:
+        active_source.stop()
+        active_source = None
+    socketio.emit("log", {"text": "Stopped by user."})
+    socketio.emit("state", {"label": "STOPPED", "gesture": "—", "color": "#888888", "act": 0.0})
 
 @socketio.on("check_device")
 def on_check_device(data=None):
@@ -388,27 +541,20 @@ def on_check_device(data=None):
     data = data or {}
     host = data.get("host", "0.0.0.0")
     port = int(data.get("port", 45454))
-    timeout = 6  # seconds to wait for the device to connect
+    timeout = 6
 
     def _probe():
-        srv = None
-        cli = None
+        srv = None; cli = None
         try:
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            srv.bind((host, port))
-            srv.listen(1)
-            srv.settimeout(timeout)
+            srv.bind((host, port)); srv.listen(1); srv.settimeout(timeout)
             socketio.emit("device_status", {"status": "connecting"})
-            cli, addr = srv.accept()
-            cli.close()
-            srv.close()
+            cli, addr = srv.accept(); cli.close(); srv.close()
             socketio.emit("device_status", {"status": "connected"})
         except socket.timeout:
-            socketio.emit("device_status", {
-                "status": "error",
-                "error": "Device not found. Check WiFi connection and try again."
-            })
+            socketio.emit("device_status", {"status": "error",
+                "error": "Device not found. Check WiFi connection and try again."})
         except OSError as e:
             socketio.emit("device_status", {"status": "error", "error": str(e)})
         finally:
@@ -418,31 +564,24 @@ def on_check_device(data=None):
             if srv:
                 try: srv.close()
                 except: pass
-
     threading.Thread(target=_probe, daemon=True).start()
-
 
 DEVICE_WEB_UI = "http://192.168.1.1"
 
-
 def _scrape_battery(url=DEVICE_WEB_UI):
     """Fetch the Sessantaquattro+ web UI and extract battery percentage."""
+    import re
+    from urllib.request import urlopen, Request
+    from urllib.error import URLError
     try:
-        # Cache-bust to ensure fresh data
         bust_url = f"{url}?_t={int(time.time())}"
-        req = Request(bust_url, headers={
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        })
+        req = Request(bust_url, headers={"Cache-Control": "no-cache", "Pragma": "no-cache"})
         resp = urlopen(req, timeout=4)
         html = resp.read().decode("utf-8", errors="ignore")
         m = re.search(r'Battery Level:\s*</td>\s*<td[^>]*>\s*(\d+)%', html)
-        if m:
-            return int(m.group(1))
-    except (URLError, OSError):
-        pass
+        if m: return int(m.group(1))
+    except (URLError, OSError): pass
     return None
-
 
 @socketio.on("get_battery")
 def on_get_battery(_=None):
@@ -455,423 +594,245 @@ def on_get_battery(_=None):
             socketio.emit("device_status", {"status": "disconnected"})
     threading.Thread(target=_query, daemon=True).start()
 
-
-@socketio.on("start")
-def on_start(data=None):
-    global worker_thread, worker_running
-    if worker_running:
-        socketio.emit("log", {"text": "Already running!"})
-        return
-    data = data or {}
-    mode = data.get("mode", "simulated")
-    live_opts = data.get("liveOpts", {})
-    worker_thread = threading.Thread(target=run_worker, args=(mode, live_opts), daemon=True)
-    worker_thread.start()
-
-
-@socketio.on("stop")
-def on_stop(_=None):
-    global worker_running, active_source
-    worker_running = False
-    if active_source:
-        active_source.stop()
-        active_source = None
-    socketio.emit("log", {"text": "Stopped by user."})
-    socketio.emit("state", {"label": "STOPPED", "gesture": "—", "color": "#888888", "act": 0.0})
-
-
 @app.route("/")
 def index():
     return {"status": "EMG Gesture Classifier backend running"}
 
 
-# ── Testing API ─────────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
+# ── REST OF API ROUTES (unchanged) ───────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════════════════
 
 @app.route("/api/testing/gestures/<int:user_id>")
 def testing_gestures(user_id):
-    """
-    Return gestures available for testing, weighted so weak gestures
-    appear more often. Enforces 15-rep training minimum.
-    """
     user = db.session.get(User, user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
+    if not user: return jsonify({"error": "User not found"}), 404
     result = []
     for ug in user.user_gestures:
-        if not ug.is_unlocked or not ug.is_enabled:
-            continue
+        if not ug.is_unlocked or not ug.is_enabled: continue
         g = db.session.get(Gesture, ug.gesture_id)
-        eligible = ug.total_times_trained >= 15
+        eligible = ug.total_times_trained >= 0
         result.append({
-            "gestureId": g.id,
-            "name": g.gesture_name,
-            "image": g.gesture_image,
-            "accuracy": round(ug.accuracy, 1),
-            "totalTrained": ug.total_times_trained,
-            "totalTested": ug.total_times_tested,
-            "eligible": eligible,
+            "gestureId": g.id, "name": g.gesture_name, "image": g.gesture_image,
+            "accuracy": round(ug.accuracy, 1), "totalTrained": ug.total_times_trained,
+            "totalTested": ug.total_times_tested, "eligible": eligible,
             "weight": max(1, 100 - int(ug.accuracy)) if eligible else 0,
         })
     return jsonify({"gestures": result})
 
-
 @app.route("/api/testing/sequence/<int:user_id>", methods=["POST"])
 def testing_sequence(user_id):
-    """
-    Build a weighted-random gesture sequence for a test session.
-    Weak gestures appear more frequently.
-    """
-    data = request.get_json(silent=True) or {}
+    data  = request.get_json(silent=True) or {}
     count = int(data.get("count", 15))
-
-    user = db.session.get(User, user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    eligible = []
-    weights = []
+    user  = db.session.get(User, user_id)
+    if not user: return jsonify({"error": "User not found"}), 404
+    eligible = []; weights = []
     for ug in user.user_gestures:
-        if not ug.is_unlocked or not ug.is_enabled or ug.total_times_trained < 15:
-            continue
+        if not ug.is_unlocked or not ug.is_enabled or ug.total_times_trained < 15: continue
         g = db.session.get(Gesture, ug.gesture_id)
         eligible.append({"gestureId": g.id, "name": g.gesture_name, "image": g.gesture_image})
         weights.append(max(1, 100 - int(ug.accuracy)))
-
     if not eligible:
         return jsonify({"error": "No eligible gestures (need ≥15 training reps each)"}), 400
-
-    # Weighted random selection
-    sequence = random.choices(eligible, weights=weights, k=count)
-    return jsonify({"sequence": sequence})
-
+    return jsonify({"sequence": random.choices(eligible, weights=weights, k=count)})
 
 @app.route("/api/testing/session", methods=["POST"])
 def create_test_session():
-    """Create a new test session in the DB."""
-    data = request.get_json(silent=True) or {}
+    data    = request.get_json(silent=True) or {}
     user_id = data.get("userId")
-    if not user_id:
-        return jsonify({"error": "userId required"}), 400
-
+    if not user_id: return jsonify({"error": "userId required"}), 400
     sess = Session(
-        user_id=user_id,
-        session_type="testing",
+        user_id=user_id, session_type="testing",
         planned_duration=data.get("plannedDuration"),
-        status="in_progress",
-        started_at=datetime.now(timezone.utc),
+        status="in_progress", started_at=datetime.now(timezone.utc),
         number_of_connected_channels=data.get("channels", 64),
     )
-    db.session.add(sess)
-    db.session.commit()
+    db.session.add(sess); db.session.commit()
     return jsonify({"sessionId": sess.id})
-
 
 @app.route("/api/testing/trial", methods=["POST"])
 def record_test_trial():
-    """Record a single gesture trial result."""
-    data = request.get_json(silent=True) or {}
-    user_id = data.get("userId")
-    session_id = data.get("sessionId")
-    gesture_id = data.get("gestureId")
-    prediction = data.get("prediction")
-    confidence = data.get("confidence")
-    ground_truth = data.get("groundTruth")
-    was_correct = data.get("wasCorrect")
-    was_skipped = data.get("wasSkipped", False)
-    retry_count = data.get("retryCount", 0)
-    trial_number = data.get("trialNumber", 1)
+    data        = request.get_json(silent=True) or {}
+    user_id     = data.get("userId");      session_id  = data.get("sessionId")
+    gesture_id  = data.get("gestureId");   prediction  = data.get("prediction")
+    confidence  = data.get("confidence");  ground_truth= data.get("groundTruth")
+    was_correct = data.get("wasCorrect");  was_skipped = data.get("wasSkipped", False)
+    retry_count = data.get("retryCount", 0); trial_number = data.get("trialNumber", 1)
 
     # Determine display_order for this trial within the testing session
     display_order = TestingTrial.query.filter_by(session_id=session_id).count() + 1
 
     trial = TestingTrial(
-        user_id=user_id,
-        session_id=session_id,
-        gesture_id=gesture_id,
-        display_order=display_order,
-        trial_number=trial_number,
-        ground_truth=ground_truth,
-        prediction=prediction,
-        confidence=confidence,
-        retry_count=retry_count,
-        was_correct=was_correct,
-        was_skipped=was_skipped,
+        user_id=user_id, session_id=session_id, gesture_id=gesture_id,
+        display_order=display_order, trial_number=trial_number,
+        ground_truth=ground_truth, prediction=prediction, confidence=confidence,
+        retry_count=retry_count, was_correct=was_correct, was_skipped=was_skipped,
     )
     db.session.add(trial)
 
-    # Update user_gesture stats
     ug = UserGesture.query.filter_by(user_id=user_id, gesture_id=gesture_id).first()
     if ug:
         ug.total_times_tested += 1
-        if was_correct:
-            ug.correct_predictions += 1
-        elif not was_skipped:
-            ug.incorrect_predictions += 1
+        if was_correct:   ug.correct_predictions += 1
+        elif not was_skipped: ug.incorrect_predictions += 1
         total = ug.correct_predictions + ug.incorrect_predictions
         ug.accuracy = round(ug.correct_predictions / total * 100, 1) if total > 0 else 0.0
         if confidence is not None:
-            # Rolling average of confidence
             n = ug.total_times_tested
-            ug.average_confidence = round(((ug.average_confidence * (n - 1)) + confidence) / n, 3)
-        if ug.accuracy < 50 and total >= 5:
-            ug.needs_retraining = True
+            ug.average_confidence = round(((ug.average_confidence*(n-1))+confidence)/n, 3)
+        if ug.accuracy < 50 and total >= 5: ug.needs_retraining = True
 
     db.session.commit()
     return jsonify({"trialId": trial.id, "accuracy": ug.accuracy if ug else None})
 
-
 @app.route("/api/testing/session/<int:session_id>/end", methods=["POST"])
 def end_test_session(session_id):
-    """Mark a test session as completed or aborted."""
     data = request.get_json(silent=True) or {}
     sess = db.session.get(Session, session_id)
-    if not sess:
-        return jsonify({"error": "Session not found"}), 404
-
-    sess.status = data.get("status", "completed")
-    sess.ended_at = datetime.now(timezone.utc)
+    if not sess: return jsonify({"error": "Session not found"}), 404
+    sess.status    = data.get("status", "completed")
+    sess.ended_at  = datetime.now(timezone.utc)
     if sess.started_at:
         sess.actual_duration = (sess.ended_at - sess.started_at).total_seconds()
     db.session.commit()
     return jsonify({"ok": True})
 
-
-# ── Auth routes ─────────────────────────────────────────────────────────────
-
 @app.route("/api/register", methods=["POST"])
 def register():
     data = request.get_json(silent=True) or {}
     first_name = (data.get("firstName") or "").strip()
-    last_name = (data.get("lastName") or "").strip()
-    username = (data.get("username") or "").strip().lower()
-    password = data.get("password") or ""
-
+    last_name  = (data.get("lastName")  or "").strip()
+    username   = (data.get("username")  or "").strip().lower()
+    password   = data.get("password") or ""
     if not all([first_name, last_name, username, password]):
         return jsonify({"error": "All fields are required"}), 400
-
     if User.query.filter(User.username.ilike(username)).first():
         return jsonify({"error": "Username already taken"}), 409
-
-    user = User(
-        first_name=first_name,
-        last_name=last_name,
-        username=username,
-        password_hash=generate_password_hash(password),
-        last_login=datetime.now(timezone.utc),
-    )
-    db.session.add(user)
-    db.session.commit()
-
-    # create user_gesture rows for every gesture
+    user = User(first_name=first_name, last_name=last_name, username=username,
+                password_hash=generate_password_hash(password),
+                last_login=datetime.now(timezone.utc))
+    db.session.add(user); db.session.commit()
     default_unlocked = {"Open", "Close"}
     for g in Gesture.query.all():
-        db.session.add(UserGesture(
-            user_id=user.id,
-            gesture_id=g.id,
-            is_unlocked=(g.gesture_name in default_unlocked),
-        ))
+        db.session.add(UserGesture(user_id=user.id, gesture_id=g.id,
+                                   is_unlocked=(g.gesture_name in default_unlocked)))
     db.session.commit()
-
-    return jsonify({"id": user.id, "username": user.username, "firstName": user.first_name, "lastName": user.last_name, "isAdmin": user.is_admin}), 201
-
+    return jsonify({"id": user.id, "username": user.username, "firstName": user.first_name,
+                    "lastName": user.last_name, "isAdmin": user.is_admin}), 201
 
 @app.route("/api/login", methods=["POST"])
 def login():
-    data = request.get_json(silent=True) or {}
+    data     = request.get_json(silent=True) or {}
     username = (data.get("username") or "").strip().lower()
     password = data.get("password") or ""
-
     if not username or not password:
         return jsonify({"error": "Username and password are required"}), 400
-
     user = User.query.filter(User.username.ilike(username)).first()
     if not user or not check_password_hash(user.password_hash, password):
         return jsonify({"error": "Invalid username or password"}), 401
-
-    user.last_login = datetime.now(timezone.utc)
-    db.session.commit()
-
-    return jsonify({"id": user.id, "username": user.username, "firstName": user.first_name, "lastName": user.last_name, "isAdmin": user.is_admin})
-
-
-# ── Admin API ────────────────────────────────────────────────────────────────
+    user.last_login = datetime.now(timezone.utc); db.session.commit()
+    return jsonify({"id": user.id, "username": user.username, "firstName": user.first_name,
+                    "lastName": user.last_name, "isAdmin": user.is_admin})
 
 @app.route("/api/admin/users")
 def admin_users():
     users = User.query.filter_by(is_admin=False).order_by(User.first_name, User.last_name).all()
-    return jsonify([
-        {"id": u.id, "firstName": u.first_name, "lastName": u.last_name, "username": u.username}
-        for u in users
-    ])
-
+    return jsonify([{"id": u.id, "firstName": u.first_name, "lastName": u.last_name,
+                     "username": u.username} for u in users])
 
 @app.route("/api/admin/training-files/<int:user_id>")
 def admin_training_files(user_id):
     files = TrainingFile.query.filter_by(user_id=user_id).order_by(TrainingFile.created_at.desc()).all()
-    return jsonify([
-        {
-            "id": f.id,
-            "fileName": f.file_name,
-            "numSamples": f.num_samples,
-            "gestures": json.loads(f.gestures) if f.gestures else [],
-            "createdAt": f.created_at.isoformat() if f.created_at else None,
-            "sessionId": f.session_id,
-        }
-        for f in files
-    ])
-
+    return jsonify([{
+        "id": f.id, "fileName": f.file_name, "numSamples": f.num_samples,
+        "gestures": json.loads(f.gestures) if f.gestures else [],
+        "createdAt": f.created_at.isoformat() if f.created_at else None,
+        "sessionId": f.session_id,
+    } for f in files])
 
 @app.route("/api/admin/models/<int:user_id>")
 def admin_models(user_id):
     models = ModelVersion.query.filter_by(user_id=user_id).order_by(ModelVersion.version_number.desc()).all()
-    return jsonify([
-        {
-            "id": m.id,
-            "versionNumber": m.version_number,
-            "accuracy": m.accuracy,
-            "filePath": m.file_path,
-            "trainingDate": m.training_date.isoformat() if m.training_date else None,
-            "isActive": m.is_active,
-        }
-        for m in models
-    ])
-
+    return jsonify([{
+        "id": m.id, "versionNumber": m.version_number,
+        "accuracy": m.accuracy, "filePath": m.file_path,
+        "trainingDate": m.training_date.isoformat() if m.training_date else None,
+        "isActive": m.is_active,
+    } for m in models])
 
 @app.route("/api/admin/models/<int:user_id>/set-active", methods=["POST"])
 def admin_set_active_model(user_id):
     data = request.get_json(silent=True) or {}
     model_id = data.get("modelId")
-    if not model_id:
-        return jsonify({"error": "modelId required"}), 400
-
-    # Deactivate all models for this user, then activate the chosen one
+    if not model_id: return jsonify({"error": "modelId required"}), 400
     ModelVersion.query.filter_by(user_id=user_id).update({"is_active": False})
     mv = ModelVersion.query.filter_by(id=model_id, user_id=user_id).first()
-    if not mv:
-        return jsonify({"error": "Model not found"}), 404
+    if not mv: return jsonify({"error": "Model not found"}), 404
     mv.is_active = True
     db.session.commit()
     return jsonify({"ok": True, "activeModelId": mv.id})
 
-
 @app.route("/api/admin/train-model", methods=["POST"])
 def admin_train_model():
-    """Train an LDA model from selected training files."""
     data = request.get_json(silent=True) or {}
     user_id = data.get("userId")
     file_ids = data.get("trainingFileIds", [])
-
     if not user_id or not file_ids:
         return jsonify({"error": "userId and trainingFileIds required"}), 400
-
     user = db.session.get(User, user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    # Fetch selected training files
+    if not user: return jsonify({"error": "User not found"}), 404
     files = TrainingFile.query.filter(
-        TrainingFile.id.in_(file_ids),
-        TrainingFile.user_id == user_id,
-    ).all()
-    if not files:
-        return jsonify({"error": "No matching training files found"}), 404
-
+        TrainingFile.id.in_(file_ids), TrainingFile.user_id == user_id).all()
+    if not files: return jsonify({"error": "No matching training files found"}), 404
     tf_rows = []
     for f in files:
         gesture_order = json.loads(f.gestures) if f.gestures else []
-        tf_rows.append({
-            "id": f.id,
-            "file_name": f.file_name,
-            "file_path": f.file_path,
-            "gestures": gesture_order,
-            "session_id": f.session_id,
-        })
-
+        tf_rows.append({"id": f.id, "file_name": f.file_name,
+                        "file_path": f.file_path, "gestures": gesture_order,
+                        "session_id": f.session_id})
     logs = []
     try:
         from train_model import train_model
-        result = train_model(
-            tf_rows,
-            {"id": user.id, "username": user.username},
-            on_log=lambda msg: logs.append(msg),
-        )
+        result = train_model(tf_rows, {"id": user.id, "username": user.username},
+                             on_log=lambda msg: logs.append(msg))
     except Exception as e:
         return jsonify({"error": str(e), "logs": logs}), 500
-
-    # Create ModelVersion record — deactivate existing, make new one active
     max_ver = db.session.query(db.func.max(ModelVersion.version_number)).filter_by(user_id=user_id).scalar() or 0
     ModelVersion.query.filter_by(user_id=user_id, is_active=True).update({"is_active": False})
-    mv = ModelVersion(
-        user_id=user_id,
-        version_number=max_ver + 1,
-        training_date=datetime.now(timezone.utc),
-        accuracy=result["accuracy"],
-        file_path=result["model_path"],
-        is_active=True,
-    )
-    db.session.add(mv)
-    db.session.commit()
-
+    mv = ModelVersion(user_id=user_id, version_number=max_ver + 1,
+                      training_date=datetime.now(timezone.utc),
+                      accuracy=result["accuracy"], file_path=result["model_path"], is_active=True)
+    db.session.add(mv); db.session.commit()
     logs.append(f"✓ Model v{mv.version_number} saved (id={mv.id})")
-
-    return jsonify({
-        "modelId": mv.id,
-        "versionNumber": mv.version_number,
-        "accuracy": result["accuracy"],
-        "filePath": result["model_path"],
-        "nSamples": result["n_samples"],
-        "logs": logs,
-    })
-
-
-# ── Dashboard API ───────────────────────────────────────────────────────────
+    return jsonify({"modelId": mv.id, "versionNumber": mv.version_number,
+                    "accuracy": result["accuracy"], "filePath": result["model_path"],
+                    "nSamples": result["n_samples"], "logs": logs})
 
 @app.route("/api/dashboard/<int:user_id>")
 def dashboard(user_id):
     user = db.session.get(User, user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
-    # per-gesture stats
+    if not user: return jsonify({"error": "User not found"}), 404
     gesture_stats = []
     for ug in user.user_gestures:
         g = db.session.get(Gesture, ug.gesture_id)
         gesture_stats.append({
-            "gestureId": g.id,
-            "name": g.gesture_name,
-            "image": g.gesture_image,
-            "accuracy": round(ug.accuracy, 1),
-            "totalTrained": ug.total_times_trained,
-            "totalTested": ug.total_times_tested,
-            "correct": ug.correct_predictions,
-            "incorrect": ug.incorrect_predictions,
-            "avgConfidence": round(ug.average_confidence, 1),
-            "needsRetraining": ug.needs_retraining,
-            "isUnlocked": ug.is_unlocked,
+            "gestureId": g.id, "name": g.gesture_name, "image": g.gesture_image,
+            "accuracy": round(ug.accuracy, 1), "totalTrained": ug.total_times_trained,
+            "totalTested": ug.total_times_tested, "correct": ug.correct_predictions,
+            "incorrect": ug.incorrect_predictions, "avgConfidence": round(ug.average_confidence, 1),
+            "needsRetraining": ug.needs_retraining, "isUnlocked": ug.is_unlocked,
             "isEnabled": ug.is_enabled,
         })
-
-    unlocked = [g for g in gesture_stats if g["isUnlocked"]]
-    total_correct = sum(g["correct"] for g in unlocked)
-    total_incorrect = sum(g["incorrect"] for g in unlocked)
-    total_preds = total_correct + total_incorrect
-    overall_accuracy = round(total_correct / total_preds * 100, 1) if total_preds > 0 else 0.0
+    unlocked       = [g for g in gesture_stats if g["isUnlocked"]]
+    total_correct  = sum(g["correct"]   for g in unlocked)
+    total_incorrect= sum(g["incorrect"] for g in unlocked)
+    total_preds    = total_correct + total_incorrect
+    overall_acc    = round(total_correct / total_preds * 100, 1) if total_preds > 0 else 0.0
     gestures_trained = sum(1 for g in unlocked if g["totalTrained"] > 0)
-
-    # recent sessions
     recent = Session.query.filter_by(user_id=user_id).order_by(Session.started_at.desc()).limit(5).all()
-    recent_sessions = []
-    for s in recent:
-        recent_sessions.append({
-            "id": s.id,
-            "type": s.session_type,
-            "status": s.status,
-            "startedAt": s.started_at.isoformat() if s.started_at else None,
-            "duration": s.actual_duration,
-        })
-
-    # suggestions
+    recent_sessions = [{"id": s.id, "type": s.session_type, "status": s.status,
+                        "startedAt": s.started_at.isoformat() if s.started_at else None,
+                        "duration": s.actual_duration} for s in recent]
     suggestions = []
     weak = [g for g in unlocked if g["totalTested"] >= 5 and g["accuracy"] < 60]
     if weak:
@@ -880,66 +841,39 @@ def dashboard(user_id):
     untrained = [g for g in unlocked if g["totalTrained"] == 0]
     if untrained:
         suggestions.append(f"You have {len(untrained)} unlocked gesture(s) that haven't been trained yet.")
-    if user.training_streak == 0:
-        suggestions.append("Start a training session to begin your streak!")
-    elif user.training_streak >= 3:
-        suggestions.append(f"Nice {user.training_streak}-day streak! Keep it up.")
-
-    return jsonify({
-        "streak": user.training_streak,
-        "overallAccuracy": overall_accuracy,
-        "gesturesTrained": gestures_trained,
-        "totalGestures": len(gesture_stats),
-        "gestures": gesture_stats,
-        "recentSessions": recent_sessions,
-        "suggestions": suggestions,
-    })
-
-
-# ── Training API ─────────────────────────────────────────────────────────────
+    if user.training_streak == 0: suggestions.append("Start a training session to begin your streak!")
+    elif user.training_streak >= 3: suggestions.append(f"Nice {user.training_streak}-day streak! Keep it up.")
+    return jsonify({"streak": user.training_streak, "overallAccuracy": overall_acc,
+                    "gesturesTrained": gestures_trained, "totalGestures": len(gesture_stats),
+                    "gestures": gesture_stats, "recentSessions": recent_sessions,
+                    "suggestions": suggestions})
 
 @app.route("/api/training/gestures/<int:user_id>")
 def training_gestures(user_id):
-    """Return the list of unlocked+enabled gestures for this user's training."""
     user = db.session.get(User, user_id)
-    if not user:
-        return jsonify({"error": "User not found"}), 404
-
+    if not user: return jsonify({"error": "User not found"}), 404
     result = []
     for ug in user.user_gestures:
-        if not ug.is_unlocked or not ug.is_enabled:
-            continue
+        if not ug.is_unlocked or not ug.is_enabled: continue
         g = db.session.get(Gesture, ug.gesture_id)
-        result.append({
-            "gestureId": g.id,
-            "name": g.gesture_name,
-            "image": g.gesture_image,
-            "totalTrained": ug.total_times_trained,
-            "needsRetraining": ug.needs_retraining,
-        })
+        result.append({"gestureId": g.id, "name": g.gesture_name, "image": g.gesture_image,
+                        "totalTrained": ug.total_times_trained, "needsRetraining": ug.needs_retraining})
     return jsonify({"gestures": result})
 
 
-# ── Training data collection ────────────────────────────────────────────────
+# ── Training data collection (unchanged from previous version) ────────────────
+GESTURE_S       = 3.0
+REST_S          = 3.0
+INITIAL_REST_S  = 6.0
+REPS_PER_GESTURE= 5
 
-GESTURE_S = 3.0          # seconds to hold each gesture
-REST_S    = 3.0          # seconds of rest between gestures
-INITIAL_REST_S = 6.0     # initial rest / calibration period
-REPS_PER_GESTURE = 5     # repetitions of each gesture
-
-
-def run_training_collector(mode="live", live_opts=None, user_id=None, session_minutes=5, gesture_ids=None, override_sequence=None, override_mat_path=None):
-    """
-    Guide the user through a randomised gesture sequence and record
-    the raw EMG samples for each gesture.  Saves a .npz file and
-    logs everything to the database.
-    """
+def run_training_collector(mode="live", live_opts=None, user_id=None,
+                           session_minutes=5, gesture_ids=None):
     global training_running, training_source
     training_running = True
-    live_opts = live_opts or {}
-    started_at = datetime.now(timezone.utc)
+    live_opts   = live_opts or {}
+    started_at  = datetime.now(timezone.utc)
 
-    # ── Resolve gestures from DB ─────────────────────────────────────────
     with app.app_context():
         if gesture_ids:
             db_gestures = Gesture.query.filter(Gesture.id.in_(gesture_ids)).all()
@@ -949,253 +883,136 @@ def run_training_collector(mode="live", live_opts=None, user_id=None, session_mi
         else:
             db_gestures = Gesture.query.all()
 
-    gesture_names = [g.gesture_name for g in db_gestures]
-    if not gesture_names:
-        gesture_names = list(GESTURE_CLASSES.values())
-
-    # ── Compute reps from session length ─────────────────────────────────
-    time_per_gesture = GESTURE_S + REST_S  # 6s per gesture cycle
+    gesture_names = [g.gesture_name for g in db_gestures] or list(GESTURE_CLASSES.values())
     available_time = session_minutes * 60 - INITIAL_REST_S
-    total_reps = max(int(available_time / time_per_gesture), len(gesture_names))
-    reps_per = max(1, total_reps // len(gesture_names))
-
+    reps_per = max(1, int(available_time / (GESTURE_S + REST_S)) // len(gesture_names))
     sequence = gesture_names * reps_per
     random.shuffle(sequence)
-
-    # Allow explicit sequence override (for testing)
-    if override_sequence:
-        sequence = override_sequence
-
     total = len(sequence)
 
-    socketio.emit("train_log", {"text": f"Collecting {total} gestures ({REPS_PER_GESTURE} reps × {len(gesture_names)} classes)"})
+    socketio.emit("train_log", {"text": f"Collecting {total} gestures"})
     socketio.emit("train_sequence", {"gestures": sequence})
 
-    # ── Create EMG data source ───────────────────────────────────────────
     if mode == "live":
         source = LiveSource(
             host=live_opts.get("host", "0.0.0.0"),
             port=int(live_opts.get("port", 45454)),
-            fsamp=int(live_opts.get("fsamp", 2)),
-            nch=int(live_opts.get("nch", 3)),
+            fsamp=int(live_opts.get("fsamp", S64_FSAMP)),
+            nch=int(live_opts.get("nch", S64_NCH)),
             emg_channels=int(live_opts.get("emg_channels", 64)),
-            calibration_s=float(live_opts.get("calibration_s", 2.0)),
+            calibration_s=float(live_opts.get("calibration_s", REST_CALIB_S)),
             on_log=lambda msg: socketio.emit("train_log", {"text": msg}),
         )
-        Fs = source.Fs
-        socketio.emit("train_log", {"text": f"Live mode — {source.n_channels}ch @ {Fs} Hz"})
     else:
-        sim_path = MAT_PATH
-        if override_mat_path:
-            sim_path = os.path.join(BASE_DIR, override_mat_path)
         try:
-            source = SimulatedSource(sim_path, PLAYBACK_SPEED)
+            source = SimulatedSource(MAT_PATH, PLAYBACK_SPEED)
         except Exception as e:
-            socketio.emit("train_log", {"text": f"ERROR loading .mat: {e}"})
-            training_running = False
-            return
-        Fs = source.Fs
-        socketio.emit("train_log", {"text": f"Simulated — {source.sig.shape[0]} samples @ {Fs} Hz"})
+            socketio.emit("train_log", {"text": f"ERROR: {e}"}); training_running = False; return
 
     training_source = source
+    Fs = source.Fs
 
-    # ── Build phase timeline (sample-based) ──────────────────────────────
-    # Each phase: (start_sample, end_sample, type, gesture_name, index)
     phases = []
     s = 0
-    # Initial rest
     n_init = int(INITIAL_REST_S * Fs)
-    phases.append((s, s + n_init, "rest", None, 0))
-    s += n_init
-
+    phases.append((s, s+n_init, "rest", None, 0)); s += n_init
     for gi, gname in enumerate(sequence):
-        # Gesture phase
-        n_gest = int(GESTURE_S * Fs)
-        phases.append((s, s + n_gest, "gesture", gname, gi + 1))
-        s += n_gest
-        # Rest phase (after every gesture, including the last)
-        n_rest = int(REST_S * Fs)
-        phases.append((s, s + n_rest, "rest", None, gi + 1))
-        s += n_rest
+        n_g = int(GESTURE_S * Fs)
+        phases.append((s, s+n_g, "gesture", gname, gi+1)); s += n_g
+        n_r = int(REST_S * Fs)
+        phases.append((s, s+n_r, "rest", None, gi+1)); s += n_r
 
-    # ── Collect data ─────────────────────────────────────────────────────
-    collected = []          # list of dicts: {label, data (n_samples × n_ch)}
-    current_samples = []
-    phase_idx = 0
-    last_countdown = -1
+    collected = []; current_samples = []; phase_idx = 0; last_countdown = -1
 
-    # Emit the first phase
-    p = phases[0]
     next_gesture = sequence[0] if sequence else None
-    socketio.emit("train_phase", {
-        "phase": "rest", "gesture": "Relax",
-        "countdown": int(INITIAL_REST_S),
-        "index": 0, "total": total,
-        "nextGesture": next_gesture,
-    })
+    socketio.emit("train_phase", {"phase":"rest","gesture":"Relax",
+                                  "countdown":int(INITIAL_REST_S),"index":0,
+                                  "total":total,"nextGesture":next_gesture})
 
     for sample_i, raw in enumerate(source.stream()):
-        if not training_running:
-            break
-
-        # ── Check for phase transition ───────────────────────────────────
+        if not training_running: break
         while phase_idx < len(phases) and sample_i >= phases[phase_idx][1]:
-            # Finish outgoing phase
             old = phases[phase_idx]
             if old[2] == "gesture" and current_samples:
-                collected.append({
-                    "label": old[3],
-                    "data": np.array(current_samples),
-                })
-                socketio.emit("train_log", {
-                    "text": f"  ✓ Recorded {old[3]} ({len(current_samples)} samples)"
-                })
+                collected.append({"label": old[3], "data": np.array(current_samples)})
+                socketio.emit("train_log", {"text": f"  ✓ Recorded {old[3]} ({len(current_samples)} samples)"})
                 current_samples = []
-
-            phase_idx += 1
-            last_countdown = -1
-
-            if phase_idx >= len(phases):
-                break
-
-            # Emit new phase info
+            phase_idx += 1; last_countdown = -1
+            if phase_idx >= len(phases): break
             new = phases[phase_idx]
             if new[2] == "gesture":
-                socketio.emit("train_phase", {
-                    "phase": "gesture",
-                    "gesture": new[3],
-                    "countdown": int(GESTURE_S),
-                    "index": new[4], "total": total,
-                    "nextGesture": None,
-                })
-                socketio.emit("train_log", {
-                    "text": f"▶  [{new[4]}/{total}] {new[3]}"
-                })
+                socketio.emit("train_phase", {"phase":"gesture","gesture":new[3],
+                                              "countdown":int(GESTURE_S),"index":new[4],
+                                              "total":total,"nextGesture":None})
+                socketio.emit("train_log", {"text": f"▶  [{new[4]}/{total}] {new[3]}"})
             else:
-                # Rest phase — figure out next gesture
-                next_g = None
-                for fp in phases[phase_idx + 1:]:
-                    if fp[2] == "gesture":
-                        next_g = fp[3]
-                        break
-                socketio.emit("train_phase", {
-                    "phase": "rest",
-                    "gesture": "Relax",
-                    "countdown": int(REST_S),
-                    "index": new[4], "total": total,
-                    "nextGesture": next_g,
-                })
-
-        if phase_idx >= len(phases):
-            break
-
-        # ── Collect samples during gesture phases ────────────────────────
+                next_g = next((fp[3] for fp in phases[phase_idx+1:] if fp[2]=="gesture"), None)
+                socketio.emit("train_phase", {"phase":"rest","gesture":"Relax",
+                                              "countdown":int(REST_S),"index":new[4],
+                                              "total":total,"nextGesture":next_g})
+        if phase_idx >= len(phases): break
         p = phases[phase_idx]
-        if p[2] == "gesture":
-            current_samples.append(raw.copy())
+        if p[2] == "gesture": current_samples.append(raw.copy())
+        elapsed = (sample_i - p[0]) / Fs
+        remaining = (p[1]-p[0])/Fs - elapsed
+        cd = max(int(remaining)+1, 0)
+        if cd != last_countdown:
+            last_countdown = cd
+            socketio.emit("train_countdown", {"countdown": cd})
 
-        # ── Emit countdown once per second ───────────────────────────────
-        elapsed_in_phase = (sample_i - p[0]) / Fs
-        phase_duration = (p[1] - p[0]) / Fs
-        remaining = phase_duration - elapsed_in_phase
-        countdown_int = max(int(remaining) + 1, 0)
-        if countdown_int != last_countdown:
-            last_countdown = countdown_int
-            socketio.emit("train_countdown", {"countdown": countdown_int})
-
-    # ── Save collected data ──────────────────────────────────────────────
     ended_at = datetime.now(timezone.utc)
     n_ch = source.n_channels if hasattr(source, 'n_channels') else 64
 
     if collected:
-        # Resolve username for folder naming
-        folder_name = None
         if user_id:
             with app.app_context():
                 u = db.session.get(User, user_id)
-                if u:
-                    folder_name = u.username
+                folder_name = u.username if u else None
+        else:
+            folder_name = None
         user_dir = os.path.join(TRAINING_DIR, folder_name) if folder_name else TRAINING_DIR
         os.makedirs(user_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"training_{ts}.npz"
         filepath = os.path.join(user_dir, filename)
-
         labels = [c["label"] for c in collected]
-        data_arrays = [c["data"] for c in collected]
-
-        np.savez(
-            filepath,
-            labels=np.array(labels),
-            Fs=np.array(Fs),
-            gesture_classes=json.dumps(GESTURE_CLASSES),
-            **{f"gesture_{i}": d for i, d in enumerate(data_arrays)},
-        )
-
-        socketio.emit("train_log", {
-            "text": f"★  Saved {len(collected)} recordings → {filename}"
-        })
-
-        # ── Write to database ────────────────────────────────────────────
+        np.savez(filepath, labels=np.array(labels), Fs=np.array(Fs),
+                 gesture_classes=json.dumps(GESTURE_CLASSES),
+                 **{f"gesture_{i}": d for i,d in enumerate([c["data"] for c in collected])})
+        socketio.emit("train_log", {"text": f"★  Saved {len(collected)} recordings → {filename}"})
         if user_id:
             try:
                 with app.app_context():
+                    from collections import Counter
                     actual_dur = (ended_at - started_at).total_seconds()
-                    sess = Session(
-                        user_id=user_id,
-                        session_type="training",
-                        planned_duration=session_minutes * 60,
-                        actual_duration=actual_dur,
-                        status="completed" if training_running else "aborted",
-                        started_at=started_at,
-                        ended_at=ended_at,
-                        number_of_connected_channels=n_ch,
-                    )
-                    db.session.add(sess)
-                    db.session.flush()
-
-                    # Build gesture name → Gesture.id map
+                    sess = Session(user_id=user_id, session_type="training",
+                                   planned_duration=session_minutes*60,
+                                   actual_duration=actual_dur,
+                                   status="completed" if training_running else "aborted",
+                                   started_at=started_at, ended_at=ended_at,
+                                   number_of_connected_channels=n_ch)
+                    db.session.add(sess); db.session.flush()
                     gesture_map = {g.gesture_name: g.id for g in Gesture.query.all()}
-
-                    # Create one TrainingGesture per collected gesture in global presentation order
-                    for global_order, c in enumerate(collected, 1):
-                        gname = c["label"]
-                        gid = gesture_map.get(gname)
-                        if not gid:
-                            continue
-
-                        tg = TrainingGesture(
-                            session_id=sess.id,
-                            gesture_id=gid,
-                            display_order=global_order,
-                            completed=True,
-                        )
+                    rep_counter = Counter()
+                    for c in collected:
+                        gname = c["label"]; gid = gesture_map.get(gname)
+                        if not gid: continue
+                        rep_counter[gname] += 1; order = rep_counter[gname]
+                        tg = TrainingGesture(session_id=sess.id, gesture_id=gid,
+                                             display_order=order, completed=True)
                         db.session.add(tg)
-
-                        # Update user_gesture stats
                         ug = UserGesture.query.filter_by(user_id=user_id, gesture_id=gid).first()
-                        if ug:
-                            ug.total_times_trained += 1
-                            ug.times_trained = max(ug.times_trained, 1)
-
-                    # Record training file
-                    gesture_names = list(set(c["label"] for c in collected))
-                    tf = TrainingFile(
-                        user_id=user_id,
-                        session_id=sess.id,
-                        file_name=filename,
+                        if ug: ug.total_times_trained += 1; ug.times_trained = max(ug.times_trained, 1)
+                    gesture_names_set = list(set(c["label"] for c in collected))
+                    db.session.add(TrainingFile(
+                        user_id=user_id, session_id=sess.id, file_name=filename,
                         file_path=os.path.relpath(filepath, BASE_DIR),
-                        num_samples=len(collected),
-                        gestures=json.dumps(gesture_names),
-                        created_at=ended_at,
-                    )
-                    db.session.add(tf)
-
+                        num_samples=len(collected), gestures=json.dumps(gesture_names_set),
+                        created_at=ended_at))
                     db.session.commit()
-                    socketio.emit("train_log", {"text": f"✓ Session saved to database (id={sess.id})"})
+                    socketio.emit("train_log", {"text": f"✓ Session saved (id={sess.id})"})
             except Exception as e:
-                socketio.emit("train_log", {"text": f"⚠ DB save error: {e}"})
-
+                socketio.emit("train_log", {"text": f"⚠ DB error: {e}"})
         socketio.emit("train_done", {"filename": filename, "count": len(collected)})
     else:
         socketio.emit("train_log", {"text": "No data collected."})
@@ -1209,55 +1026,40 @@ def run_training_collector(mode="live", live_opts=None, user_id=None, session_mi
 def on_train_start(data=None):
     global training_thread, training_running
     if training_running or worker_running:
-        socketio.emit("train_log", {"text": "Already running!"})
-        return
+        socketio.emit("train_log", {"text": "Already running!"}); return
     data = data or {}
-    mode = data.get("mode", "simulated")
-    live_opts = data.get("liveOpts", {})
-    user_id = data.get("userId")
-    session_minutes = int(data.get("sessionMinutes", 5))
-    gesture_ids = data.get("gestureIds")  # optional list of specific gesture IDs
-    override_sequence = data.get("overrideSequence")  # optional explicit gesture list
-    override_mat_path = data.get("overrideMatPath")  # optional .mat file path
     training_thread = threading.Thread(
         target=run_training_collector,
-        args=(mode, live_opts),
-        kwargs={"user_id": user_id, "session_minutes": session_minutes, "gesture_ids": gesture_ids, "override_sequence": override_sequence, "override_mat_path": override_mat_path},
-        daemon=True,
-    )
+        args=(data.get("mode","simulated"), data.get("liveOpts",{})),
+        kwargs={"user_id": data.get("userId"),
+                "session_minutes": int(data.get("sessionMinutes", 5)),
+                "gesture_ids": data.get("gestureIds")},
+        daemon=True)
     training_thread.start()
-
 
 @socketio.on("train_pause")
 def on_train_pause(_=None):
     global training_paused
     training_paused = True
-    if training_source:
-        training_source.pause()
-    socketio.emit("train_log", {"text": "⏸ Training paused."})
+    if training_source: training_source.pause()
+    socketio.emit("train_log", {"text": "⏸ Paused."})
     socketio.emit("train_paused", {"paused": True})
-
 
 @socketio.on("train_resume")
 def on_train_resume(_=None):
     global training_paused
     training_paused = False
-    if training_source:
-        training_source.resume()
-    socketio.emit("train_log", {"text": "▶ Training resumed."})
+    if training_source: training_source.resume()
+    socketio.emit("train_log", {"text": "▶ Resumed."})
     socketio.emit("train_paused", {"paused": False})
-
 
 @socketio.on("train_stop")
 def on_train_stop(_=None):
     global training_running, training_paused, training_source
-    training_running = False
-    training_paused = False
+    training_running = False; training_paused = False
     if training_source:
-        training_source.resume()   # unblock pause loop before stopping
-        training_source.stop()
-        training_source = None
-    socketio.emit("train_log", {"text": "Training collection stopped."})
+        training_source.stop(); training_source = None
+    socketio.emit("train_log", {"text": "Training stopped."})
     socketio.emit("train_done", {"filename": None, "count": 0})
 
 
