@@ -185,8 +185,120 @@ function drawPipeWood(ctx, x, y, w, h) {
   ctx.strokeRect(x - 4, capY, w + 8, capH);
 }
 
+// for the original theme
+function drawPipeLegacy(ctx, x, y, w, h, col = '#5c5cff') {
+  if (h <= 0) return;
+  const gr = ctx.createLinearGradient(x, 0, x + w, 0);
+  gr.addColorStop(0,   col + '1a');
+  gr.addColorStop(0.4, col + 'aa');
+  gr.addColorStop(1,   col + '1a');
+  ctx.fillStyle   = gr;
+  ctx.strokeStyle = col + 'cc';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 3);
+  ctx.fill();
+  ctx.stroke();
+}
+
 // ── THEME DEFINITIONS ─────────────────────────────────────────────────────────
 const GAME_THEMES = {
+    default: {
+    name: 'Default',
+    emoji: '🎮',
+    border: '#1e1e35',
+
+    drawBg(ctx) {
+      ctx.fillStyle = '#06060f';
+      ctx.fillRect(0, 0, GW, GH);
+
+      ctx.strokeStyle = '#ffffff07';
+      ctx.lineWidth = 1;
+
+      for (let x = 0; x < GW; x += 60) {
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, GH);
+        ctx.stroke();
+      }
+
+      for (let y = 0; y < GH; y += 50) {
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(GW, y);
+        ctx.stroke();
+      }
+    },
+
+    drawPipe(ctx, x, y, w, h, pipeColor) {
+      drawPipeLegacy(ctx, x, y, w, h, pipeColor || '#5c5cff');
+    },
+
+    drawLabel(ctx, pipe) {
+      const col = pipe.color || '#5c5cff';
+      ctx.save();
+      ctx.font = 'bold 11px monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = col;
+      ctx.shadowBlur = 12;
+      ctx.fillStyle = col;
+      ctx.fillText(pipe.label, pipe.x + PW / 2, gapCenterY(pipe.gapTop));
+      ctx.restore();
+    },
+
+    drawChar(ctx, x, y, flash, flashType) {
+      const bc =
+        flash > 0 && flashType === 'pass'
+          ? '#69ff47'
+          : flash > 0 && flashType === 'hit'
+          ? '#ff4081'
+          : '#00e5ff';
+
+      ctx.save();
+      ctx.shadowColor = bc;
+      ctx.shadowBlur = 20;
+
+      const bg = ctx.createRadialGradient(x - 4, y - 4, 2, x, y, BR);
+      bg.addColorStop(0, '#ffffff');
+      bg.addColorStop(0.45, bc);
+      bg.addColorStop(1, '#00000055');
+
+      ctx.beginPath();
+      ctx.arc(x, y, BR, 0, Math.PI * 2);
+      ctx.fillStyle = bg;
+      ctx.fill();
+      ctx.restore();
+    },
+
+    drawBar(ctx, activation, tOnVal) {
+      const barH = GH - 30;
+      const fillH = Math.min(1, activation / (tOnVal * 2.5)) * barH;
+
+      ctx.fillStyle = '#ffffff08';
+      ctx.beginPath();
+      ctx.roundRect(8, 15, 10, barH, 5);
+      ctx.fill();
+
+      if (fillH > 0) {
+        const bg2 = ctx.createLinearGradient(0, 15 + barH, 0, 15 + barH - fillH);
+        bg2.addColorStop(0, '#00e5ff');
+        bg2.addColorStop(1, '#ff4081');
+        ctx.fillStyle = bg2;
+        ctx.beginPath();
+        ctx.roundRect(8, 15 + barH - fillH, 10, fillH, 4);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = '#ffffff55';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(activation.toFixed(1), 13, GH - 4);
+    },
+
+    flashPass: 'rgba(105,255,71,',
+    flashFail: 'rgba(255,64,129,',
+  },
   outdoor: {
     name: 'Outdoor', emoji: '🌿',
     border: '#8aaa7a',
@@ -705,28 +817,47 @@ function FlappyBallGame({
       // ── Pipes ──
       g.pipes.forEach(p => {
         const gapBot = p.gapTop + GAP_H;
-        T.drawPipe(ctx, p.x, 0, PW, p.gapTop);
-        T.drawPipe(ctx, p.x, gapBot, PW, GH - gapBot);
-        ctx.font = 'bold 11px monospace'; ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle = T.pipeLabel;
-        ctx.fillText(p.label, p.x + PW / 2, gapCenterY(p.gapTop));
+        T.drawPipe(ctx, p.x, 0, PW, p.gapTop, p.color);
+        T.drawPipe(ctx, p.x, gapBot, PW, GH - gapBot, p.color);
+
+        if (T.drawLabel) {
+          T.drawLabel(ctx, p);
+        } else {
+          ctx.font = 'bold 11px monospace';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = T.pipeLabel;
+          ctx.fillText(p.label, p.x + PW / 2, gapCenterY(p.gapTop));
+        }
       });
+      // added
 
       // ── Character ──
       T.drawChar(ctx, BX, g.ballY, g.flash, g.flashType);
 
       // ── Activation bar ──
-      const barH  = GH - 30;
-      const fillH = Math.min(1, l.activation / (tOn_ * 2.5)) * barH;
-      ctx.fillStyle = T.barTrack;
-      ctx.beginPath(); ctx.roundRect(8, 15, 10, barH, 5); ctx.fill();
-      if (fillH > 0) {
-        ctx.fillStyle = T.barFill;
-        ctx.beginPath(); ctx.roundRect(8, 15 + barH - fillH, 10, fillH, 4); ctx.fill();
+      if (T.drawBar) {
+        T.drawBar(ctx, l.activation, tOn_);
+      } else {
+        const barH  = GH - 30;
+        const fillH = Math.min(1, l.activation / (tOn_ * 2.5)) * barH;
+        ctx.fillStyle = T.barTrack;
+        ctx.beginPath();
+        ctx.roundRect(8, 15, 10, barH, 5);
+        ctx.fill();
+
+        if (fillH > 0) {
+          ctx.fillStyle = T.barFill;
+          ctx.beginPath();
+          ctx.roundRect(8, 15 + barH - fillH, 10, fillH, 4);
+          ctx.fill();
+        }
+
+        ctx.fillStyle = T.barText;
+        ctx.font = '9px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(l.activation.toFixed(1), 13, GH - 4);
       }
-      ctx.fillStyle = T.barText; ctx.font = '9px monospace'; ctx.textAlign = 'center';
-      ctx.fillText(l.activation.toFixed(1), 13, GH - 4);
 
       rafId = requestAnimationFrame(loop);
     }
@@ -780,7 +911,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const [gestures,      setGestures]      = useState([]);
   const [focusGestures, setFocusGestures] = useState([]);
   const [speedMult,     setSpeedMult]     = useState(1.0);
-  const [gameTheme,     setGameTheme]     = useState('outdoor');
+  const [gameTheme,     setGameTheme]     = useState('default');
 
   const [sessionId,      setSessionId]      = useState(null);
   const [gesturePool,    setGesturePool]    = useState([]);

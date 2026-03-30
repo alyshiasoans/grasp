@@ -28,7 +28,7 @@ from models import db, User, Gesture, UserGesture, Session, TrainingGesture, Tes
 # ── Paths ────────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAT_PATH   = os.path.join(BASE_DIR, "KateGesturesRound2Jan20.mat")
-MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kate_model_mar30.pkl")
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kate_model_jan20_1.pkl")
 PLAYBACK_SPEED = 1.0
 
 # ── Gesture catalogue ────────────────────────────────────────────────────────
