@@ -29,6 +29,8 @@ const MAX_RETRIES    = 3;
 const CHANNEL_COUNT  = 64;
 const GOOD_THRESHOLD = 50;
 const FAIR_THRESHOLD = 30;
+const SUCCESS_GREEN  = '#35d06e';
+const GAME_VIEW_MAX  = 1120;
 
 // Absolute RMS threshold defaults — overridden live from backend signal events
 const T_ON_DEFAULT  = 40;
@@ -89,7 +91,7 @@ function SensorStatusBar({ channels }) {
   const activeCount = useMemo(() => channels.filter(v => v > 0.15).length, [channels]);
   const quality = activeCount >= GOOD_THRESHOLD ? 'good'
     : activeCount >= FAIR_THRESHOLD ? 'fair' : 'poor';
-  const col   = { good:'#69ff47', fair:'#ffd740', poor:'#ff4081' }[quality];
+  const col   = { good:SUCCESS_GREEN, fair:'#ffd740', poor:'#ff4081' }[quality];
   const label = { good:'Good',    fair:'Fair',    poor:'Poor'    }[quality];
   return (
     <div style={{ display:'flex', alignItems:'center', gap:6,
@@ -151,7 +153,7 @@ function EMGStrip({ actHistory, tOn, tOff }) {
   return (
     <div>
       <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace',
-        marginBottom:3, letterSpacing:1 }}>EMG ACTIVATION (absolute RMS)</div>
+        marginBottom:3, letterSpacing:1 }}>EMG ACTIVATION</div>
       <canvas ref={ref} width={700} height={80}
         style={{ width:'100%', height:80, borderRadius:6,
           border:'1px solid #1a1a2e', display:'block' }} />
@@ -201,6 +203,110 @@ function drawPipeLegacy(ctx, x, y, w, h, col = '#5c5cff') {
   ctx.stroke();
 }
 
+
+function drawPipeDimensional(ctx, x, y, w, h, baseCol, edgeCol, highlightCol, shadowCol, capCol) {
+  if (h <= 0) return;
+
+  const bodyGrad = ctx.createLinearGradient(x, 0, x + w, 0);
+  bodyGrad.addColorStop(0, shadowCol);
+  bodyGrad.addColorStop(0.18, highlightCol);
+  bodyGrad.addColorStop(0.55, baseCol);
+  bodyGrad.addColorStop(0.82, edgeCol);
+  bodyGrad.addColorStop(1, shadowCol);
+
+  ctx.fillStyle = bodyGrad;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 4);
+  ctx.fill();
+
+  ctx.strokeStyle = edgeCol;
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 4);
+  ctx.stroke();
+
+  ctx.fillStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath();
+  ctx.roundRect(x + 4, y + 3, Math.max(4, w * 0.14), Math.max(0, h - 6), 3);
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(0,0,0,0.14)';
+  ctx.beginPath();
+  ctx.roundRect(x + w - 10, y + 2, 6, Math.max(0, h - 4), 3);
+  ctx.fill();
+
+  const capH = 8;
+  const capY = (y === 0) ? y + h - capH : y;
+  const capGrad = ctx.createLinearGradient(x - 4, 0, x + w + 4, 0);
+  capGrad.addColorStop(0, shadowCol);
+  capGrad.addColorStop(0.2, highlightCol);
+  capGrad.addColorStop(0.5, capCol);
+  capGrad.addColorStop(1, edgeCol);
+
+  ctx.fillStyle = capGrad;
+  ctx.beginPath();
+  ctx.roundRect(x - 4, capY, w + 8, capH, 3);
+  ctx.fill();
+
+  ctx.strokeStyle = edgeCol;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(x - 4, capY, w + 8, capH, 3);
+  ctx.stroke();
+}
+
+function drawPipeWoodEnhanced(ctx, x, y, w, h) {
+  if (h <= 0) return;
+
+  const woodGrad = ctx.createLinearGradient(x, 0, x + w, 0);
+  woodGrad.addColorStop(0, '#4f2f1b');
+  woodGrad.addColorStop(0.18, '#8a5a34');
+  woodGrad.addColorStop(0.55, '#6b4226');
+  woodGrad.addColorStop(0.82, '#7b4d2c');
+  woodGrad.addColorStop(1, '#4a2d1b');
+
+  ctx.fillStyle = woodGrad;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 3);
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(70,40,20,0.35)';
+  ctx.lineWidth = 1;
+  for (let sy = y + 14; sy < y + h; sy += 14) {
+    ctx.beginPath();
+    ctx.moveTo(x + 2, sy);
+    ctx.lineTo(x + w - 2, sy);
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = 'rgba(255,255,255,0.06)';
+  ctx.beginPath();
+  ctx.roundRect(x + 4, y + 3, 5, Math.max(0, h - 6), 2);
+  ctx.fill();
+
+  ctx.strokeStyle = '#8b6340';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(x, y, w, h, 3);
+  ctx.stroke();
+
+  const capH = 8;
+  const capY = (y === 0) ? y + h - capH : y;
+  const capGrad = ctx.createLinearGradient(x - 4, 0, x + w + 4, 0);
+  capGrad.addColorStop(0, '#5a371f');
+  capGrad.addColorStop(0.2, '#8f6038');
+  capGrad.addColorStop(0.5, '#7a5030');
+  capGrad.addColorStop(1, '#5a371f');
+
+  ctx.fillStyle = capGrad;
+  ctx.beginPath();
+  ctx.roundRect(x - 4, capY, w + 8, capH, 3);
+  ctx.fill();
+
+  ctx.strokeStyle = '#5a371f';
+  ctx.strokeRect(x - 4, capY, w + 8, capH);
+}
+
 // ── THEME DEFINITIONS ─────────────────────────────────────────────────────────
 const GAME_THEMES = {
     default: {
@@ -237,7 +343,7 @@ const GAME_THEMES = {
     drawLabel(ctx, pipe) {
       const col = pipe.color || '#5c5cff';
       ctx.save();
-      ctx.font = 'bold 11px monospace';
+      ctx.font = 'bold 12px monospace';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.shadowColor = col;
@@ -325,7 +431,7 @@ const GAME_THEMES = {
         ctx.beginPath(); ctx.moveTo(gx, gt); ctx.lineTo(gx + 2, gt - 5 - Math.sin(gx * 0.7) * 3); ctx.stroke();
       }
     },
-    drawPipe(ctx, x, y, w, h) { drawPipeWood(ctx, x, y, w, h); },
+    drawPipe(ctx, x, y, w, h) { drawPipeWoodEnhanced(ctx, x, y, w, h); },
     pipeLabel: '#5a371f',
     drawChar(ctx, x, y, flash, flashType) {
       // Bird
@@ -378,9 +484,14 @@ const GAME_THEMES = {
       ctx.beginPath(); ctx.arc(GW - 72, 60, 35, 0, Math.PI * 2); ctx.fill();
     },
     drawPipe(ctx, x, y, w, h) {
-      drawPipeSimple(ctx, x, y, w, h, '#2c2c50', '#4a4a80');
-      const capH = 6, capY = (y === 0) ? y + h - capH : y;
-      ctx.fillStyle = '#3a3a6a'; ctx.fillRect(x - 3, capY, w + 6, capH);
+      drawPipeDimensional(
+        ctx, x, y, w, h,
+        '#31315c',
+        '#56569a',
+        '#6d6db8',
+        '#20203f',
+        '#45457e'
+      );
     },
     pipeLabel: '#8888cc',
     drawChar(ctx, x, y, flash, flashType) {
@@ -448,10 +559,14 @@ const GAME_THEMES = {
       ctx.fillStyle = '#4a6a50'; ctx.fillRect(0, GH - 25, GW, 3);
     },
     drawPipe(ctx, x, y, w, h) {
-      drawPipeSimple(ctx, x, y, w, h, '#1a5a5a', '#2a8a7a');
-      // Coral cap
-      const capH = 7, capY = (y === 0) ? y + h - capH : y;
-      ctx.fillStyle = '#2a7a6a'; ctx.fillRect(x - 3, capY, w + 6, capH);
+      drawPipeDimensional(
+        ctx, x, y, w, h,
+        '#1f6d69',
+        '#39a39c',
+        '#5fd0c6',
+        '#124b49',
+        '#2f8d86'
+      );
     },
     pipeLabel: '#5ac0b0',
     drawChar(ctx, x, y, flash, flashType) {
@@ -518,9 +633,14 @@ const GAME_THEMES = {
       ctx.lineTo(GW, GH - 35); ctx.fill();
     },
     drawPipe(ctx, x, y, w, h) {
-      drawPipeSimple(ctx, x, y, w, h, '#3a2018', '#5a3828');
-      const capH = 6, capY = (y === 0) ? y + h - capH : y;
-      ctx.fillStyle = '#4a2820'; ctx.fillRect(x - 3, capY, w + 6, capH);
+      drawPipeDimensional(
+        ctx, x, y, w, h,
+        '#4a2a20',
+        '#77503d',
+        '#9f7658',
+        '#2e1a14',
+        '#5b3627'
+      );
     },
     pipeLabel: '#c08050',
     drawChar(ctx, x, y, flash, flashType) {
@@ -599,16 +719,22 @@ const GAME_THEMES = {
       });
     },
     drawPipe(ctx, x, y, w, h) {
-      drawPipeSimple(ctx, x, y, w, h, '#8ab4cc', '#a0c8dd');
-      // Ice cap
-      const capH = 6, capY = (y === 0) ? y + h - capH : y;
-      ctx.fillStyle = '#b0d4e8'; ctx.fillRect(x - 3, capY, w + 6, capH);
-      // Icicles on bottom of top pipe
+      drawPipeDimensional(
+        ctx, x, y, w, h,
+        '#8fbfd7',
+        '#b8d8e8',
+        '#dff2fb',
+        '#6f9bb0',
+        '#c7e4f1'
+      );
+
       if (y === 0) {
-        ctx.fillStyle = '#c0ddef';
+        ctx.fillStyle = '#d7edf8';
         for (let ix = x + 5; ix < x + w - 5; ix += 10) {
           ctx.beginPath();
-          ctx.moveTo(ix - 2, y + h); ctx.lineTo(ix, y + h + 8); ctx.lineTo(ix + 2, y + h);
+          ctx.moveTo(ix - 2, y + h);
+          ctx.lineTo(ix, y + h + 8);
+          ctx.lineTo(ix + 2, y + h);
           ctx.fill();
         }
       }
@@ -823,7 +949,7 @@ function FlappyBallGame({
         if (T.drawLabel) {
           T.drawLabel(ctx, p);
         } else {
-          ctx.font = 'bold 11px monospace';
+          ctx.font = 'bold 12px monospace';
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillStyle = T.pipeLabel;
@@ -867,9 +993,20 @@ function FlappyBallGame({
   }, []);
 
   return (
-    <canvas ref={canvasRef} width={GW} height={GH}
-      style={{ width:'100%', height:'auto', display:'block',
-        borderRadius:10, border:`1px solid ${(theme || GAME_THEMES.outdoor).border}` }} />
+    <canvas
+      ref={canvasRef}
+      width={GW}
+      height={GH}
+      style={{
+        width:'100%',
+        height:'auto',
+        display:'block',
+        borderRadius:10,
+        border:`1px solid ${(theme || GAME_THEMES.outdoor).border}`,
+        background:'#05050a',
+        boxShadow:'0 10px 28px rgba(0,0,0,0.22)',
+      }}
+    />
   );
 }
 
@@ -937,7 +1074,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   );
   const [actHistory,  setActHistory]  = useState([]);
   const [stats,       setStats]       = useState({ correct:0, incorrect:0, skipped:0, total:0 });
-  const [logs,        setLogs]        = useState([]);
 
   const simRef      = useRef(null);
   const simRunning  = useRef(false);
@@ -946,11 +1082,22 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const poolRef     = useRef([]);
   const classifyRef = useRef(null);
   const tOnRef      = useRef(T_ON_DEFAULT);
+  const gameShellRef = useRef(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   useEffect(() => { curRef.current    = currentGesture; }, [currentGesture]);
   useEffect(() => { poolRef.current   = gesturePool;    }, [gesturePool]);
   useEffect(() => { simIdxRef.current = simIdx;         }, [simIdx]);
   useEffect(() => { tOnRef.current    = tOnLive;        }, [tOnLive]);
+
+  useEffect(() => {
+    const onFsChange = () => {
+      setIsFullscreen(document.fullscreenElement === gameShellRef.current);
+    };
+
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, []);
 
   // ── Fetch eligible gestures ───────────────────────────────────────────────
   useEffect(() => {
@@ -1031,7 +1178,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const handleCorrect = useCallback(async () => {
     const g = curRef.current;
     setStats(prev => ({ ...prev, correct: prev.correct + 1, total: prev.total + 1 }));
-    setLogs(prev  => [...prev.slice(-59), `✓  ${g?.name} (marked)`]);
     await recordTrial(g, prediction, true, false);
     advanceToNext();
   }, [prediction, recordTrial, advanceToNext]);
@@ -1039,7 +1185,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const handleIncorrect = useCallback(async () => {
     const g = curRef.current;
     setStats(prev => ({ ...prev, incorrect: prev.incorrect + 1, total: prev.total + 1 }));
-    setLogs(prev  => [...prev.slice(-59), `✗  ${g?.name} → ${prediction}`]);
     await recordTrial(g, prediction, false, false);
     if (retryCount < MAX_RETRIES - 1) {
       setRetryCount(p => p + 1);
@@ -1053,7 +1198,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const handleSkip = useCallback(async () => {
     const g = curRef.current;
     setStats(prev => ({ ...prev, skipped: prev.skipped + 1, total: prev.total + 1 }));
-    setLogs(prev  => [...prev.slice(-59), `⟶  ${g?.name || ''}`]);
     await recordTrial(g, null, false, true);
     advanceToNext();
   }, [recordTrial, advanceToNext]);
@@ -1064,7 +1208,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
     if (result?.isCorrect && passed) {
       setStats(prev => ({ ...prev, correct: prev.correct + 1, total: prev.total + 1 }));
-      setLogs(prev  => [...prev.slice(-59), `✓  ${g?.name}`]);
       await recordTrial(g, result.predicted, true, false);
       advanceToNext();
       return;
@@ -1130,8 +1273,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
               : ALL_GESTURES[Math.floor(Math.random() * ALL_GESTURES.length)]
           );
           setVotes(fv);
-          setLogs(prev => [...prev.slice(-59),
-            `★  ${predicted}${predicted !== target ? `  (expected ${target})` : ''}`]);
           classifyRef.current(predicted, fv);
         }
         if (act >= SIM_T_ON * 3.6) { simPhase = 'hold'; timer = 0; }
@@ -1190,11 +1331,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
       lastLabel = label;
     };
 
-    const onLog = (data) => {
-      if (!data.text) return;
-      setLogs(prev => [...prev.slice(-59), data.text]);
-    };
-
     // signal event carries t_on / t_off so the strip always draws correct lines
     const onSignal = (data) => {
       try {
@@ -1218,14 +1354,22 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
     };
 
     socket.on('state',  onState);
-    socket.on('log',    onLog);
     socket.on('signal', onSignal);
     return () => {
       socket.off('state',  onState);
-      socket.off('log',    onLog);
       socket.off('signal', onSignal);
     };
   }, [socket, mode]);
+
+  const toggleFullscreen = useCallback(async () => {
+    try {
+      if (!document.fullscreenElement) {
+        await gameShellRef.current?.requestFullscreen?.();
+      } else if (document.fullscreenElement === gameShellRef.current) {
+        await document.exitFullscreen?.();
+      }
+    } catch (_) {}
+  }, []);
 
   // ── Start session ─────────────────────────────────────────────────────────
   const handleStart = useCallback(async () => {
@@ -1255,7 +1399,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
       setCurrentGesture(firstGesture);
       setRetryCount(0);
       setStats({ correct:0, incorrect:0, skipped:0, total:0 });
-      setLogs(['▶  session started']);
       setPrediction(null); setVotes([]); setPendingResult(null);
       setActHistory([]); setActivation(0);
       setGamePaused(false);
@@ -1277,7 +1420,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
       if (socket && mode === 'live') socket.emit('start', { mode:'live', liveOpts });
     } catch (e) {
-      setLogs(prev => [...prev, `Error: ${e.message}`]);
+      console.error('Failed to start testing session:', e);
     }
   }, [user, mode, liveOpts, gestures, focusGestures, buildPool, pickFromPool, socket]);
 
@@ -1309,7 +1452,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   // ── SETUP ─────────────────────────────────────────────────────────────────
   // ═════════════════════════════════════════════════════════════════════════
   if (phase === 'setup') return (
-    <div className="testing-page" style={{ maxWidth:820, margin:'0 auto', padding:'0 0 40px' }}>
+    <div className="testing-page" style={{ maxWidth:920, margin:'0 auto', padding:'0 0 40px' }}>
       <div className="card test-setup-card">
         <h3 className="dashboard-card-title">Test Session Setup</h3>
         <div className="train-setup-grid">
@@ -1321,16 +1464,8 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
                 : 'Eligible Gestures — click to focus (★ = 3× more frequent)'}
             </label>
             {mode === 'simulated' ? (
-              <div style={{ display:'flex', flexWrap:'wrap', gap:5, marginTop:6 }}>
-                {SIM_GESTURE_ORDER.map((name, i) => (
-                  <div key={i} style={{
-                    background:'#0d0d1a',
-                    border:`1px solid ${GESTURE_COLORS[name] || '#333'}44`,
-                    borderRadius:5, padding:'2px 9px',
-                    fontSize:'0.7rem', fontFamily:'monospace',
-                    color: GESTURE_COLORS[name] || '#888',
-                  }}>{i + 1}. {name}</div>
-                ))}
+              <div style={{ marginTop: 6, fontSize: '0.78rem', color: '#888' }}>
+                Simulation uses a fixed internal gesture order.
               </div>
             ) : (
               <>
@@ -1441,7 +1576,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   if (phase === 'done') {
     const acc = stats.total > 0 ? Math.round(stats.correct / stats.total * 100) : 0;
     return (
-      <div className="testing-page" style={{ maxWidth:700, margin:'0 auto' }}>
+      <div className="testing-page" style={{ maxWidth:760, margin:'0 auto' }}>
         <div className="card test-done-card">
           <h3 className="test-done-title">Session Complete</h3>
           <div className="test-done-stats">
@@ -1460,16 +1595,10 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
           <div style={{ display:'flex', gap:10, justifyContent:'center', marginTop:18 }}>
             <button className="btn btn-start test-new-btn" onClick={() => {
               setPhase('setup'); setSessionId(null); setCurrentGesture(null);
-              setStats({ correct:0, incorrect:0, skipped:0, total:0 }); setLogs([]);
+              setStats({ correct:0, incorrect:0, skipped:0, total:0 });
             }}>New Session</button>
             {onSessionEnd &&
               <button className="btn btn-stop" onClick={onSessionEnd}>Log Out</button>}
-          </div>
-        </div>
-        <div className="card log-card" style={{ marginTop:16 }}>
-          <h3>Session Log</h3>
-          <div className="log-entries">
-            {logs.map((e, i) => <div key={i} className="log-entry">{e}</div>)}
           </div>
         </div>
       </div>
@@ -1480,14 +1609,22 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   // ── ACTIVE SESSION ────────────────────────────────────────────────────────
   // ═════════════════════════════════════════════════════════════════════════
   return (
-    <div className="testing-page" style={{ position:'relative', maxWidth:900, margin:'0 auto' }}>
+    <div
+      className="testing-page"
+      style={{
+        position:'relative',
+        maxWidth:1120,
+        margin:'0 auto',
+        paddingBottom:20,
+      }}
+    >
 
       {/* Header */}
       <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between',
         marginBottom:10, gap:12, flexWrap:'wrap' }}>
         <div style={{ display:'flex', gap:14, alignItems:'center',
           fontFamily:'monospace', fontSize:'0.8rem' }}>
-          <span style={{ color:'#69ff47' }}>✓ {stats.correct}</span>
+          <span style={{ color:'#35d06e' }}>✓ {stats.correct}</span>
           <span style={{ color:'#ff4081' }}>✗ {stats.incorrect}</span>
           <span style={{ color:'#888' }}>⟶ {stats.skipped}</span>
           {accLive !== null && <span style={{ color:'#aaa' }}>acc {accLive}%</span>}
@@ -1503,27 +1640,29 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
           )}
         </div>
         <SensorStatusBar channels={channels} />
-        <button className="btn btn-stop" style={{ flexShrink:0 }}
-          onClick={() => endSession('aborted')}>■ End Session</button>
+        <div style={{ display:'flex', gap:8, alignItems:'center', flexShrink:0 }}>
+          <button className="btn btn-stop" style={{ flexShrink:0 }}
+            onClick={() => endSession('aborted')}>■ End Session</button>
+        </div>
       </div>
 
       {/* Gesture prompt */}
       {currentGesture && (
-        <div style={{ display:'flex', alignItems:'center', gap:14,
+        <div style={{ display:'flex', alignItems:'center', gap:16,
           background:'#0d0d1a', border:`1px solid ${gColor}44`,
-          borderRadius:10, padding:'10px 18px', marginBottom:10,
-          boxShadow:`0 0 20px ${gColor}12` }}>
+          borderRadius:10, padding:'12px 18px', marginBottom:6,
+          boxShadow:`0 0 20px ${gColor}12`, maxWidth:GAME_VIEW_MAX, marginInline:'auto', width:'100%', boxSizing:'border-box' }}>
           {GESTURE_IMAGES[currentGesture.name] && (
             <img src={GESTURE_IMAGES[currentGesture.name]} alt={currentGesture.name}
-              style={{ width:52, height:52, objectFit:'cover', borderRadius:8,
-                border:`2px solid ${gColor}55` }} />
+              style={{ width:70, height:70, objectFit:'cover', borderRadius:10,
+                border:`2px solid ${gColor}55`, flexShrink:0 }} />
           )}
-          <div>
-            <div style={{ fontSize:'0.68rem', color:'#888', fontFamily:'monospace', letterSpacing:1 }}>
+          <div style={{ minWidth:0 }}>
+            <div style={{ fontSize:'0.72rem', color:'#888', fontFamily:'monospace', letterSpacing:1.2 }}>
               {mode === 'simulated' ? 'PROMPT' : 'PERFORM THIS GESTURE'}
             </div>
-            <div style={{ fontSize:'1.5rem', fontWeight:800, color:gColor,
-              fontFamily:'monospace', letterSpacing:2, textShadow:`0 0 14px ${gColor}` }}>
+            <div style={{ fontSize:'1.72rem', fontWeight:800, color:gColor,
+              fontFamily:'monospace', letterSpacing:2, textShadow:`0 0 14px ${gColor}`, lineHeight:1.05 }}>
               {currentGesture.name.toUpperCase()}
             </div>
           </div>
@@ -1538,7 +1677,8 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
           {/* Live detected gesture indicator */}
           {pendingResult?.predicted && (() => {
             const isMatch = pendingResult.predicted === currentGesture?.name;
-            const detCol = isMatch ? '#69ff47' : '#ff4081';
+            const predGestureCol = GESTURE_COLORS[pendingResult.predicted] || '#00e5ff';
+            const detCol = isMatch ? SUCCESS_GREEN : '#ff4081';
             return (
               <div style={{ marginLeft: retryCount > 0 ? 0 : 'auto',
                 display:'flex', alignItems:'center', gap:10,
@@ -1547,19 +1687,19 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
                 {GESTURE_IMAGES[pendingResult.predicted] && (
                   <img src={GESTURE_IMAGES[pendingResult.predicted]} alt={pendingResult.predicted}
                     style={{ width:36, height:36, objectFit:'cover', borderRadius:6,
-                      border:`2px solid ${detCol}55` }} />
+                      border:`2px solid ${predGestureCol}66` }} />
                 )}
                 <div>
                   <div style={{ fontSize:'0.6rem', color:'#666', fontFamily:'monospace', letterSpacing:1 }}>
                     DETECTED
                   </div>
-                  <div style={{ fontSize:'1rem', fontWeight:800, color:detCol,
+                  <div style={{ fontSize:'1rem', fontWeight:800, color:predGestureCol,
                     fontFamily:'monospace', letterSpacing:1,
-                    textShadow:`0 0 10px ${detCol}` }}>
+                    textShadow:`0 0 10px ${predGestureCol}` }}>
                     {pendingResult.predicted.toUpperCase()}
                   </div>
                 </div>
-                <span style={{ fontSize:'1.2rem' }}>{isMatch ? '✓' : '✗'}</span>
+                <span style={{ fontSize:'1.2rem', color:detCol, fontWeight:800 }}>{isMatch ? '✓' : '✗'}</span>
               </div>
             );
           })()}
@@ -1567,69 +1707,117 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
       )}
 
       {/* Game */}
-      <div style={{ position:'relative' }}>
-        <FlappyBallGame
-          activation={activation}
-          tOn={tOnLive}
-          activeNow={mode === 'live' ? liveStateLabel === 'ACTIVE' : activation >= T_ON_DEFAULT}
-          decision={pendingResult}
-          targetGesture={currentGesture?.name}
-          gestureColor={gColor}
-          onPipeResolve={onPipeResolve}
-          speedMultiplier={speedMult}
-          paused={gamePaused}
-          theme={GAME_THEMES[gameTheme] || GAME_THEMES.outdoor}
-        />
+      <div
+        ref={gameShellRef}
+        style={{
+          position:'relative',
+          marginTop:4,
+          maxWidth:isFullscreen ? 'none' : GAME_VIEW_MAX,
+          marginInline:'auto',
+          background:isFullscreen ? '#05050a' : 'transparent',
+          width:'100%',
+          height:isFullscreen ? '100vh' : 'auto',
+          display:'flex',
+          flexDirection:'column',
+          justifyContent:'center',
+          padding:isFullscreen ? '24px' : 0,
+          boxSizing:'border-box',
+        }}
+      >
+        <div
+          style={{
+            position:'relative',
+            width:'100%',
+            maxWidth:isFullscreen ? 'min(1400px, 96vw)' : '100%',
+            margin:'0 auto',
+            padding:isFullscreen ? 20 : 0,
+            borderRadius:isFullscreen ? 16 : 0,
+            background:isFullscreen ? '#0b0b14' : 'transparent',
+            boxShadow:isFullscreen ? '0 0 0 1px #1e1e35, 0 20px 60px rgba(0,0,0,0.45)' : 'none',
+          }}
+        >
+          <FlappyBallGame
+            activation={activation}
+            tOn={tOnLive}
+            activeNow={mode === 'live' ? liveStateLabel === 'ACTIVE' : activation >= T_ON_DEFAULT}
+            decision={pendingResult}
+            targetGesture={currentGesture?.name}
+            gestureColor={gColor}
+            onPipeResolve={onPipeResolve}
+            speedMultiplier={speedMult}
+            paused={gamePaused}
+            theme={GAME_THEMES[gameTheme] || GAME_THEMES.outdoor}
+          />
 
-        {/* Mismatch overlay */}
-        {phase === 'result' && (
-          <div style={{ position:'absolute', inset:0, background:'#000000cc',
-            borderRadius:10, display:'flex', alignItems:'center', justifyContent:'center' }}>
-            <div style={{ background:'#0f0f1e', border:'1px solid #1e1e35',
-              borderRadius:14, padding:'28px 36px', textAlign:'center',
-              maxWidth:420, width:'90%', boxShadow:'0 0 60px #000' }}>
-              <div style={{ fontSize:'0.7rem', color:'#555', fontFamily:'monospace',
-                letterSpacing:2, marginBottom:12 }}>CLASSIFICATION RESULT</div>
-              <div style={{ display:'flex', alignItems:'center', justifyContent:'center',
-                gap:16, marginBottom:16 }}>
-                <div>
-                  <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace' }}>EXPECTED</div>
-                  <div style={{ fontSize:'1.3rem', fontWeight:800, color:'#aaa', fontFamily:'monospace' }}>
-                    {currentGesture?.name}
+          <button
+            type="button"
+            aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+            onClick={toggleFullscreen}
+            style={{
+              position:'absolute',
+              top:isFullscreen ? 32 : 10,
+              right:isFullscreen ? 32 : 10,
+              width:38,
+              height:38,
+              borderRadius:10,
+              border:'1px solid #ffffff22',
+              background:'rgba(8,10,18,0.72)',
+              color:'#d8deff',
+              display:'flex',
+              alignItems:'center',
+              justifyContent:'center',
+              cursor:'pointer',
+              backdropFilter:'blur(6px)',
+              boxShadow:'0 4px 16px rgba(0,0,0,0.28)',
+              zIndex:5,
+            }}
+          >
+            <span style={{ fontSize:'1rem', lineHeight:1 }}>{isFullscreen ? '🗗' : '⛶'}</span>
+          </button>
+
+          {/* Mismatch overlay */}
+          {phase === 'result' && (
+            <div style={{ position:'absolute', inset:isFullscreen ? 24 : 16, background:'#000000cc',
+              borderRadius:10, display:'flex', alignItems:'center', justifyContent:'center' }}>
+              <div style={{ background:'#0f0f1e', border:'1px solid #1e1e35',
+                borderRadius:14, padding:'28px 36px', textAlign:'center',
+                maxWidth:420, width:'90%', boxShadow:'0 0 60px #000' }}>
+                <div style={{ fontSize:'0.7rem', color:'#555', fontFamily:'monospace',
+                  letterSpacing:2, marginBottom:12 }}>CLASSIFICATION RESULT</div>
+                <div style={{ display:'flex', alignItems:'center', justifyContent:'center',
+                  gap:16, marginBottom:16 }}>
+                  <div>
+                    <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace' }}>EXPECTED</div>
+                    <div style={{ fontSize:'1.3rem', fontWeight:800, color:'#aaa', fontFamily:'monospace' }}>
+                      {currentGesture?.name}
+                    </div>
+                  </div>
+                  <div style={{ fontSize:'1.5rem', color:'#555' }}>→</div>
+                  <div>
+                    <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace' }}>PREDICTED</div>
+                    <div style={{ fontSize:'1.3rem', fontWeight:800, fontFamily:'monospace',
+                      color:'#ff4081', textShadow:'0 0 10px #ff4081' }}>
+                      {prediction || '?'}
+                    </div>
                   </div>
                 </div>
-                <div style={{ fontSize:'1.5rem', color:'#555' }}>→</div>
-                <div>
-                  <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace' }}>PREDICTED</div>
-                  <div style={{ fontSize:'1.3rem', fontWeight:800, fontFamily:'monospace',
-                    color:'#ff4081', textShadow:'0 0 10px #ff4081' }}>
-                    {prediction || '?'}
-                  </div>
+                {votes.length > 0 && <div style={{ marginBottom:16 }}><VotesPie votes={votes} /></div>}
+                <div style={{ fontSize:'0.8rem', color:'#888', marginBottom:14 }}>
+                  Is this what you did?
                 </div>
-              </div>
-              {votes.length > 0 && <div style={{ marginBottom:16 }}><VotesPie votes={votes} /></div>}
-              <div style={{ fontSize:'0.8rem', color:'#888', marginBottom:14 }}>
-                Is this what you did?
-              </div>
-              <div style={{ display:'flex', gap:8, justifyContent:'center' }}>
-                <button className="btn test-correct-btn" onClick={handleCorrect}>✓ Yes</button>
-                <button className="btn test-incorrect-btn" onClick={handleIncorrect}>✗ No</button>
-                <button className="btn test-skip-btn" onClick={handleSkip}>Skip</button>
+                <div style={{ display:'flex', gap:8, justifyContent:'center' }}>
+                  <button className="btn test-correct-btn" onClick={handleCorrect}>✓ Yes</button>
+                  <button className="btn test-incorrect-btn" onClick={handleIncorrect}>✗ No</button>
+                  <button className="btn test-skip-btn" onClick={handleSkip}>Skip</button>
+                </div>
               </div>
             </div>
-          </div>
-        )}
-      </div>
+          )}
+        </div>
 
-      {/* EMG strip — passes live absolute thresholds */}
-      <div style={{ marginTop:10 }}>
-        <EMGStrip actHistory={actHistory} tOn={tOnLive} tOff={tOffLive} />
-      </div>
-
-      {/* Log */}
-      <div className="card log-card" style={{ marginTop:10, maxHeight:110, overflowY:'auto' }}>
-        <div className="log-entries">
-          {logs.map((e, i) => <div key={i} className="log-entry">{e}</div>)}
+        {/* EMG strip — passes live absolute thresholds */}
+        <div style={{ marginTop:12, width:'100%', maxWidth:GAME_VIEW_MAX, marginInline:'auto' }}>
+          <EMGStrip actHistory={actHistory} tOn={tOnLive} tOff={tOffLive} />
         </div>
       </div>
 
