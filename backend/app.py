@@ -11,7 +11,7 @@ Set PRINT_CALIB_HINT = True once per participant to discover the right values,
 then set PRINT_CALIB_HINT = False and hardcode T_ON_ABS / T_OFF_ABS.
 """
 
-import os, sys, threading, time, random, json, sqlite3, socket, struct
+import os, sys, threading, time, random, json, sqlite3, socket, struct, collections
 import numpy as np
 from scipy.signal import butter, lfilter, lfilter_zi, iirnotch
 from scipy.io import loadmat
@@ -22,6 +22,7 @@ from flask import Flask, request, jsonify
 from flask_socketio import SocketIO
 from flask_cors import CORS
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 
 from models import db, User, Gesture, UserGesture, Session, TrainingGesture, TestingTrial, ModelVersion, TrainingFile
 
@@ -96,6 +97,7 @@ db.init_app(app)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 TRAINING_DIR = os.path.join(BASE_DIR, "training_data")
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploaded_training_data")
 
 worker_thread   = None
 worker_running  = False
@@ -116,6 +118,18 @@ def ensure_sqlite_schema():
         if "is_admin" not in user_columns:
             cursor.execute(
                 "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"
+            )
+        cursor.execute("PRAGMA table_info(model_versions)")
+        model_columns = {row[1] for row in cursor.fetchall()}
+        if "model_name" not in model_columns:
+            cursor.execute(
+                "ALTER TABLE model_versions ADD COLUMN model_name TEXT"
+            )
+        cursor.execute("PRAGMA table_info(sessions)")
+        session_columns = {row[1] for row in cursor.fetchall()}
+        if "session_name" not in session_columns:
+            cursor.execute(
+                "ALTER TABLE sessions ADD COLUMN session_name TEXT"
             )
         conn.commit()
 
@@ -195,10 +209,15 @@ class SimulatedSource:
         self.speed = speed
         self.n_channels = 64
         self._stop = False
+        self._paused = False
 
     def stream(self):
         dt = 1.0 / (self.Fs * self.speed)
         for row in self.sig:
+            if self._stop:
+                break
+            while self._paused and not self._stop:
+                time.sleep(0.01)
             if self._stop:
                 break
             t0 = time.perf_counter()
@@ -210,8 +229,11 @@ class SimulatedSource:
     def stop(self):
         self._stop = True
 
-    def pause(self): pass
-    def resume(self): pass
+    def pause(self):
+        self._paused = True
+
+    def resume(self):
+        self._paused = False
 
 
 # ── Live source ───────────────────────────────────────────────────────────────
@@ -287,14 +309,19 @@ class LiveSource:
 
 
 # ── Core worker ───────────────────────────────────────────────────────────────
-def run_worker(mode="simulated", live_opts=None):
+def run_worker(mode="simulated", live_opts=None, user_id=None, model_id=None, test_file_id=None, thresholds=None):
     """
     Process EMG data and emit SocketIO updates.
-    Uses absolute RMS thresholds — matches NEWREALCLASSIFIER.py exactly.
+    Uses rest-normalized RMS thresholds for testing so activation is user-scaled.
     """
     global worker_running, active_source
     worker_running = True
     live_opts = live_opts or {}
+    thresholds = thresholds or {}
+    t_on_ratio = float(thresholds.get("tOn", 2.0))
+    t_off_ratio = float(thresholds.get("tOff", 1.3))
+    if t_off_ratio >= t_on_ratio:
+        t_off_ratio = max(0.1, t_on_ratio - 0.2)
 
     try:
         import joblib
@@ -305,9 +332,23 @@ def run_worker(mode="simulated", live_opts=None):
 
     socketio.emit("state", {"label": "LOADING...", "gesture": "—", "color": "#ffffff", "act": 0.0})
 
+    model_path = MODEL_PATH
+    model_label = os.path.basename(MODEL_PATH)
+    if user_id:
+        with app.app_context():
+            selected_model = None
+            if model_id:
+                selected_model = ModelVersion.query.filter_by(id=model_id, user_id=user_id).first()
+            if not selected_model:
+                selected_model = ModelVersion.query.filter_by(user_id=user_id, is_active=True).order_by(ModelVersion.version_number.desc()).first()
+            if selected_model and selected_model.file_path:
+                candidate = selected_model.file_path
+                model_path = candidate if os.path.isabs(candidate) else os.path.join(BASE_DIR, candidate)
+                model_label = selected_model.model_name or f"Model v{selected_model.version_number}"
+
     try:
-        scaler, model = joblib.load(MODEL_PATH)
-        socketio.emit("log", {"text": "✓  model loaded"})
+        scaler, model = joblib.load(model_path)
+        socketio.emit("log", {"text": f"✓  model loaded: {model_label}"})
     except Exception as e:
         socketio.emit("log", {"text": f"ERROR loading model: {e}"})
         worker_running = False
@@ -327,15 +368,24 @@ def run_worker(mode="simulated", live_opts=None):
         Fs   = source.Fs
         n_ch = source.emg_channels
     else:
+        sim_mat_path = MAT_PATH
+        sim_label = os.path.basename(MAT_PATH)
+        if user_id and test_file_id:
+            with app.app_context():
+                tf = TrainingFile.query.filter_by(id=test_file_id, user_id=user_id).first()
+                if tf and tf.file_path:
+                    candidate = tf.file_path
+                    sim_mat_path = candidate if os.path.isabs(candidate) else os.path.join(BASE_DIR, candidate)
+                    sim_label = tf.file_name
         try:
-            source = SimulatedSource(MAT_PATH, PLAYBACK_SPEED)
+            source = SimulatedSource(sim_mat_path, PLAYBACK_SPEED)
         except Exception as e:
             socketio.emit("log", {"text": f"ERROR loading .mat: {e}"})
             worker_running = False
             return
         Fs   = source.Fs
         n_ch = source.n_channels
-        socketio.emit("log", {"text": f"Loaded {source.sig.shape[0]} samples @ {Fs:.0f} Hz"})
+        socketio.emit("log", {"text": f"Loaded {sim_label} ({source.sig.shape[0]} samples @ {Fs:.0f} Hz)"})
 
     active_source = source
 
@@ -358,10 +408,10 @@ def run_worker(mode="simulated", live_opts=None):
     win_s    = int(WIN_MS      / 1000 * Fs)
     max_g    = int(MAX_GESTURE_S * Fs)
 
-    # ── Optional calibration hint state ──────────────────────────────────
-    hint_buf    = []
-    hint_done   = False
-    hint_needed = int(CALIB_HINT_S * Fs)
+    # ── Rest baseline calibration ────────────────────────────────────────
+    cal_buf = []
+    cal_needed = int(CALIB_HINT_S * Fs)
+    rest_mean = None
 
     # ── Detection state ───────────────────────────────────────────────────
     det_buf     = deque(maxlen=det_win)
@@ -378,12 +428,9 @@ def run_worker(mode="simulated", live_opts=None):
     sig_flex = []
     sig_ext  = []
 
-    if PRINT_CALIB_HINT:
-        socketio.emit("log", {"text": f"HINT MODE: collecting {CALIB_HINT_S}s rest baseline…"})
-        socketio.emit("state", {"label": "HINT MODE", "gesture": "—", "color": "#e040fb", "act": 0.0})
-    else:
-        socketio.emit("log", {"text": f"✓  ready — T_ON={T_ON_ABS}  T_OFF={T_OFF_ABS}  (absolute RMS)"})
-        socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
+    socketio.emit("log", {"text": f"Calibrating rest baseline for {CALIB_HINT_S:.1f}s… keep relaxed"})
+    socketio.emit("log", {"text": f"Thresholds — T_ON={t_on_ratio}  T_OFF={t_off_ratio}  (rest-normalized RMS)"})
+    socketio.emit("state", {"label": "CALIBRATING", "gesture": "REST", "color": "#444444", "act": 0.0})
 
     # ── Main sample loop ──────────────────────────────────────────────────
     for raw in source.stream():
@@ -392,19 +439,16 @@ def run_worker(mode="simulated", live_opts=None):
 
         filtered = filt(raw - np.mean(raw))
 
-        # ── Optional calibration hint (non-blocking) ──────────────────────
-        if PRINT_CALIB_HINT and not hint_done:
-            hint_buf.append(filtered)
-            if len(hint_buf) >= hint_needed:
-                arr       = np.stack(hint_buf, axis=1)
-                rest_mean = np.sqrt(np.mean(arr ** 2, axis=1))
-                med       = float(np.median(rest_mean))
-                msg = (f"HINT: median rest RMS={med:.4f}  "
-                       f"→ T_ON={2.4*med:.1f}  T_OFF={1.6*med:.1f}")
-                print(f"\n{'='*55}\n  {msg}\n{'='*55}\n")
-                socketio.emit("log", {"text": msg})
-                hint_done = True
-            # Fall through — keep classifying with current absolute thresholds
+        if rest_mean is None:
+            cal_buf.append(filtered)
+            if len(cal_buf) < cal_needed:
+                continue
+            arr = np.stack(cal_buf, axis=1)
+            rest_mean = np.sqrt(np.mean(arr ** 2, axis=1))
+            rest_mean[rest_mean < 1e-6] = 1e-6
+            socketio.emit("log", {"text": f"Calibration done — baseline median RMS {float(np.median(rest_mean)):.4f}"})
+            socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 1.0})
+            continue
 
         # ── Accumulate buffers ────────────────────────────────────────────
         if state_ == 1:
@@ -418,13 +462,14 @@ def run_worker(mode="simulated", live_opts=None):
             continue
         det_ctr = 0
 
-        # ── Activation: absolute median RMS — no rest_mean division ──────
-        w   = np.stack(det_buf, axis=1)
-        act = float(np.median(np.sqrt(np.mean(w ** 2, axis=1))))
+        # ── Activation: rest-normalized RMS so baseline is ~1.0 ───────────
+        w = np.stack(det_buf, axis=1)
+        rms_per_ch = np.sqrt(np.mean(w ** 2, axis=1)) / rest_mean
+        act = float(np.median(rms_per_ch))
 
-        # Signal strip: absolute RMS for flexors (ch 0–31) and extensors (ch 32–63)
-        act_flex = float(np.median(np.sqrt(np.mean(w[:32] ** 2, axis=1))))
-        act_ext  = float(np.median(np.sqrt(np.mean(w[32:64] ** 2, axis=1))))
+        # Signal strip: rest-normalized RMS for flexors (ch 0–31) and extensors (ch 32–63)
+        act_flex = float(np.median(rms_per_ch[:32]))
+        act_ext  = float(np.median(rms_per_ch[32:64]))
         sig_flex.append(act_flex)
         sig_ext.append(act_ext)
         wf = sig_flex[-100:]; we = sig_ext[-100:]
@@ -432,8 +477,8 @@ def run_worker(mode="simulated", live_opts=None):
         socketio.emit("signal", {
             "flexors":   [{"x": sf+j, "y": round(v, 2)} for j, v in enumerate(wf)],
             "extensors": [{"x": se+j, "y": round(v, 2)} for j, v in enumerate(we)],
-            "t_on":  T_ON_ABS,
-            "t_off": T_OFF_ABS,
+            "t_on":  t_on_ratio,
+            "t_off": t_off_ratio,
         })
 
         log_ctr += 1
@@ -447,7 +492,7 @@ def run_worker(mode="simulated", live_opts=None):
 
         # ── State machine ─────────────────────────────────────────────────
         if state_ == 0:
-            if act > T_ON_ABS:
+            if act > t_on_ratio:
                 cnt_on += 1
                 if cnt_on >= N_ON:
                     socketio.emit("state", {"label": "ACTIVE", "gesture": "", "color": "#ffffff", "act": round(act, 2)})
@@ -457,7 +502,7 @@ def run_worker(mode="simulated", live_opts=None):
                 cnt_on = 0
         else:
             gest_buf.append(filtered)
-            cnt_off = cnt_off + 1 if act < T_OFF_ABS else 0
+            cnt_off = cnt_off + 1 if act < t_off_ratio else 0
             gesture_end = (cnt_off >= N_OFF) or (len(gest_buf) >= max_g)
 
             if len(gest_buf) >= win_s:
@@ -530,7 +575,15 @@ def on_start(data=None):
     data      = data or {}
     mode      = data.get("mode", "simulated")
     live_opts = data.get("liveOpts", {})
-    worker_thread = threading.Thread(target=run_worker, args=(mode, live_opts), daemon=True)
+    user_id    = data.get("userId")
+    model_id   = data.get("modelId")
+    test_file_id = data.get("testFileId")
+    thresholds = data.get("thresholds", {})
+    worker_thread = threading.Thread(
+        target=run_worker,
+        args=(mode, live_opts, user_id, model_id, test_file_id, thresholds),
+        daemon=True,
+    )
     worker_thread.start()
 
 @socketio.on("stop")
@@ -542,6 +595,20 @@ def on_stop(_=None):
         active_source = None
     socketio.emit("log",  {"text": "Stopped by user."})
     socketio.emit("state", {"label": "STOPPED", "gesture": "—", "color": "#888888", "act": 0.0})
+
+
+@socketio.on("pause")
+def on_pause(_=None):
+    if active_source and hasattr(active_source, "pause"):
+        active_source.pause()
+    socketio.emit("log", {"text": "Paused."})
+
+
+@socketio.on("resume")
+def on_resume(_=None):
+    if active_source and hasattr(active_source, "resume"):
+        active_source.resume()
+    socketio.emit("log", {"text": "Resumed."})
 
 @socketio.on("check_device")
 def on_check_device(data=None):
@@ -673,15 +740,31 @@ def _check_auto_unlock(user_id):
             return name
     return None
 
+
+def refresh_user_gesture_testing_stats(user_id):
+    user_gestures = UserGesture.query.filter_by(user_id=user_id).all()
+    for ug in user_gestures:
+        trials = TestingTrial.query.filter_by(user_id=user_id, gesture_id=ug.gesture_id).all()
+        ug.total_times_tested = len(trials)
+        ug.correct_predictions = sum(1 for t in trials if t.was_correct)
+        ug.incorrect_predictions = sum(1 for t in trials if (t.was_correct is False and not t.was_skipped))
+        total = ug.correct_predictions + ug.incorrect_predictions
+        ug.accuracy = round((ug.correct_predictions / total) * 100, 1) if total else 0.0
+        confidences = [t.confidence for t in trials if t.confidence is not None]
+        ug.average_confidence = round(sum(confidences) / len(confidences), 3) if confidences else 0.0
+        ug.needs_retraining = ug.accuracy < 50 and total >= 5
+
 @app.route("/api/testing/session", methods=["POST"])
 def create_test_session():
     data    = request.get_json(silent=True) or {}
     user_id = data.get("userId")
     if not user_id: return jsonify({"error": "userId required"}), 400
+    started_at = datetime.now(timezone.utc)
     sess = Session(
         user_id=user_id, session_type="testing",
         planned_duration=data.get("plannedDuration"),
-        status="in_progress", started_at=datetime.now(timezone.utc),
+        session_name=(data.get("sessionName") or "").strip() or f"Testing Session {started_at.strftime('%Y-%m-%d %H:%M')}",
+        status="in_progress", started_at=started_at,
         number_of_connected_channels=data.get("channels", 64),
     )
     db.session.add(sess); db.session.commit()
@@ -811,25 +894,42 @@ def admin_toggle_unlock(user_id):
     db.session.commit()
     return jsonify({"ok": True, "gestureId": gesture_id, "isUnlocked": ug.is_unlocked})
 
+
+def serialize_training_file(f):
+    file_ext = os.path.splitext(f.file_name or "")[1].lower()
+    gestures = json.loads(f.gestures) if f.gestures else []
+    return {
+        "id": f.id,
+        "fileName": f.file_name,
+        "numSamples": f.num_samples,
+        "gestures": gestures,
+        "createdAt": f.created_at.isoformat() if f.created_at else None,
+        "sessionId": f.session_id,
+        "fileType": file_ext.lstrip("."),
+        "canTrain": file_ext == ".mat" and bool(gestures),
+    }
+
+
+def serialize_model(m):
+    return {
+        "id": m.id,
+        "versionNumber": m.version_number,
+        "modelName": m.model_name or f"Model v{m.version_number}",
+        "accuracy": m.accuracy,
+        "filePath": m.file_path,
+        "trainingDate": m.training_date.isoformat() if m.training_date else None,
+        "isActive": m.is_active,
+    }
+
 @app.route("/api/admin/training-files/<int:user_id>")
 def admin_training_files(user_id):
     files = TrainingFile.query.filter_by(user_id=user_id).order_by(TrainingFile.created_at.desc()).all()
-    return jsonify([{
-        "id": f.id, "fileName": f.file_name, "numSamples": f.num_samples,
-        "gestures": json.loads(f.gestures) if f.gestures else [],
-        "createdAt": f.created_at.isoformat() if f.created_at else None,
-        "sessionId": f.session_id,
-    } for f in files])
+    return jsonify([serialize_training_file(f) for f in files])
 
 @app.route("/api/admin/models/<int:user_id>")
 def admin_models(user_id):
     models = ModelVersion.query.filter_by(user_id=user_id).order_by(ModelVersion.version_number.desc()).all()
-    return jsonify([{
-        "id": m.id, "versionNumber": m.version_number,
-        "accuracy": m.accuracy, "filePath": m.file_path,
-        "trainingDate": m.training_date.isoformat() if m.training_date else None,
-        "isActive": m.is_active,
-    } for m in models])
+    return jsonify([serialize_model(m) for m in models])
 
 @app.route("/api/admin/models/<int:user_id>/set-active", methods=["POST"])
 def admin_set_active_model(user_id):
@@ -843,11 +943,149 @@ def admin_set_active_model(user_id):
     db.session.commit()
     return jsonify({"ok": True, "activeModelId": mv.id})
 
+
+@app.route("/api/training/files/<int:user_id>")
+def user_training_files(user_id):
+    files = TrainingFile.query.filter_by(user_id=user_id).order_by(TrainingFile.created_at.desc()).all()
+    return jsonify([serialize_training_file(f) for f in files])
+
+
+@app.route("/api/training/files/upload", methods=["POST"])
+def upload_training_file():
+    user_id = request.form.get("userId", type=int)
+    if not user_id:
+        return jsonify({"error": "userId required"}), 400
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"error": "MAT file required"}), 400
+
+    original_name = secure_filename(upload.filename)
+    if not original_name.lower().endswith(".mat"):
+        return jsonify({"error": "Only .mat files are supported"}), 400
+
+    gesture_order_raw = (request.form.get("gestureOrder") or "").strip()
+    gesture_order = [g.strip() for g in gesture_order_raw.split(",") if g.strip()]
+    if not gesture_order:
+        return jsonify({"error": "gestureOrder required"}), 400
+
+    try:
+        m = loadmat(upload.stream)
+        data = np.array(m["Data"], dtype=float)
+        sample_count = int(data.shape[0])
+        upload.stream.seek(0)
+    except Exception as e:
+        return jsonify({"error": f"Invalid MAT file: {e}"}), 400
+
+    user_dir = os.path.join(UPLOAD_DIR, user.username)
+    os.makedirs(user_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    saved_name = f"{os.path.splitext(original_name)[0]}_{ts}.mat"
+    saved_path = os.path.join(user_dir, saved_name)
+    upload.save(saved_path)
+
+    tf = TrainingFile(
+        user_id=user_id,
+        file_name=original_name,
+        file_path=os.path.relpath(saved_path, BASE_DIR),
+        num_samples=sample_count,
+        gestures=json.dumps(gesture_order),
+        created_at=datetime.now(timezone.utc),
+    )
+    db.session.add(tf)
+    db.session.commit()
+    return jsonify({"ok": True, "file": serialize_training_file(tf)})
+
+
+@app.route("/api/training/files/<int:file_id>", methods=["DELETE"])
+def delete_training_file(file_id):
+    user_id = request.args.get("userId", type=int)
+    tf = TrainingFile.query.filter_by(id=file_id, user_id=user_id).first()
+    if not tf:
+        return jsonify({"error": "Training file not found"}), 404
+    abs_path = os.path.join(BASE_DIR, tf.file_path)
+    db.session.delete(tf)
+    db.session.commit()
+    try:
+        if os.path.exists(abs_path):
+            os.remove(abs_path)
+    except OSError:
+        pass
+    return jsonify({"ok": True, "deletedFileId": file_id})
+
+
+@app.route("/api/training/files/<int:file_id>", methods=["PATCH"])
+def update_training_file(file_id):
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("userId")
+    if not user_id:
+        return jsonify({"error": "userId required"}), 400
+    file_name = (data.get("fileName") or "").strip()
+    gesture_order_raw = data.get("gestureOrder")
+    tf = TrainingFile.query.filter_by(id=file_id, user_id=user_id).first()
+    if not tf:
+        return jsonify({"error": "Training file not found"}), 404
+    if file_name:
+        tf.file_name = file_name
+    if gesture_order_raw is not None:
+        gesture_order = [g.strip() for g in gesture_order_raw.strip().split(",") if g.strip()]
+        if not gesture_order:
+            return jsonify({"error": "gestureOrder required"}), 400
+        tf.gestures = json.dumps(gesture_order)
+    if not file_name and gesture_order_raw is None:
+        return jsonify({"error": "Nothing to update"}), 400
+    db.session.commit()
+    return jsonify({"ok": True, "file": serialize_training_file(tf)})
+
+
+@app.route("/api/training/models/<int:user_id>")
+def user_models(user_id):
+    models = ModelVersion.query.filter_by(user_id=user_id).order_by(ModelVersion.version_number.desc()).all()
+    return jsonify([serialize_model(m) for m in models])
+
+
+@app.route("/api/training/models/<int:model_id>", methods=["PATCH"])
+def rename_model(model_id):
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("userId")
+    model_name = (data.get("modelName") or "").strip()
+    if not user_id:
+        return jsonify({"error": "userId required"}), 400
+    if not model_name:
+        return jsonify({"error": "modelName required"}), 400
+    mv = ModelVersion.query.filter_by(id=model_id, user_id=user_id).first()
+    if not mv:
+        return jsonify({"error": "Model not found"}), 404
+    mv.model_name = model_name
+    db.session.commit()
+    return jsonify({"ok": True, "model": serialize_model(mv)})
+
+
+@app.route("/api/training/models/<int:model_id>", methods=["DELETE"])
+def delete_model(model_id):
+    user_id = request.args.get("userId", type=int)
+    mv = ModelVersion.query.filter_by(id=model_id, user_id=user_id).first()
+    if not mv:
+        return jsonify({"error": "Model not found"}), 404
+    abs_path = os.path.join(BASE_DIR, mv.file_path) if mv.file_path else None
+    db.session.delete(mv)
+    db.session.commit()
+    try:
+        if abs_path and os.path.exists(abs_path):
+            os.remove(abs_path)
+    except OSError:
+        pass
+    return jsonify({"ok": True, "deletedModelId": model_id})
+
 @app.route("/api/admin/train-model", methods=["POST"])
 def admin_train_model():
     data = request.get_json(silent=True) or {}
     user_id = data.get("userId")
     file_ids = data.get("trainingFileIds", [])
+    model_name = (data.get("modelName") or "").strip()
     if not user_id or not file_ids:
         return jsonify({"error": "userId and trainingFileIds required"}), 400
     user = db.session.get(User, user_id)
@@ -865,18 +1103,20 @@ def admin_train_model():
     try:
         from train_model import train_model
         result = train_model(tf_rows, {"id": user.id, "username": user.username},
+                             model_name=model_name or None,
                              on_log=lambda msg: logs.append(msg))
     except Exception as e:
         return jsonify({"error": str(e), "logs": logs}), 500
     max_ver = db.session.query(db.func.max(ModelVersion.version_number)).filter_by(user_id=user_id).scalar() or 0
     ModelVersion.query.filter_by(user_id=user_id, is_active=True).update({"is_active": False})
     mv = ModelVersion(user_id=user_id, version_number=max_ver + 1,
+                      model_name=model_name or f"Model v{max_ver + 1}",
                       training_date=datetime.now(timezone.utc),
                       accuracy=result["accuracy"], file_path=result["model_path"], is_active=True)
     db.session.add(mv); db.session.commit()
-    logs.append(f"✓ Model v{mv.version_number} saved (id={mv.id})")
+    logs.append(f"✓ {mv.model_name} saved (id={mv.id})")
     return jsonify({"modelId": mv.id, "versionNumber": mv.version_number,
-                    "accuracy": result["accuracy"], "filePath": result["model_path"],
+                    "modelName": mv.model_name, "accuracy": result["accuracy"], "filePath": result["model_path"],
                     "nSamples": result["n_samples"], "logs": logs})
 
 @app.route("/api/dashboard/<int:user_id>")
@@ -918,6 +1158,187 @@ def dashboard(user_id):
                     "gesturesTrained": gestures_trained, "totalGestures": len(gesture_stats),
                     "gestures": gesture_stats, "recentSessions": recent_sessions,
                     "suggestions": suggestions})
+
+
+def build_progress_payload(user_id, search=""):
+    user = db.session.get(User, user_id)
+    if not user:
+        return None
+
+    all_gesture_names = []
+    gesture_stats = []
+    per_gesture_accuracies = []
+    for ug in user.user_gestures:
+        g = db.session.get(Gesture, ug.gesture_id)
+        if g:
+            all_gesture_names.append(g.gesture_name)
+        gesture_trials = TestingTrial.query.filter_by(user_id=user_id, gesture_id=ug.gesture_id).all()
+        correct_count = sum(1 for t in gesture_trials if t.was_correct)
+        incorrect_count = sum(1 for t in gesture_trials if (t.was_correct is False and not t.was_skipped))
+        skipped_count = sum(1 for t in gesture_trials if t.was_skipped)
+        total_attempts = correct_count + incorrect_count + skipped_count
+        misclassified_as = collections.Counter()
+        for trial in gesture_trials:
+            if trial.was_correct or trial.was_skipped:
+                continue
+            pred = (trial.prediction or "Unknown").strip() or "Unknown"
+            misclassified_as[pred] += 1
+        avg_acc = round((correct_count / total_attempts) * 100, 1) if total_attempts else 0.0
+        per_gesture_accuracies.append(avg_acc)
+        gesture_stats.append({
+            "gestureId": g.id,
+            "name": g.gesture_name,
+            "accuracy": avg_acc,
+            "averageAccuracy": avg_acc,
+            "totalTrained": ug.total_times_trained,
+            "totalTested": len(gesture_trials),
+            "correct": correct_count,
+            "incorrect": incorrect_count,
+            "skipped": skipped_count,
+            "misclassifiedAs": [
+                {"name": name, "count": count}
+                for name, count in misclassified_as.most_common()
+            ],
+            "isUnlocked": ug.is_unlocked,
+            "isEnabled": ug.is_enabled,
+        })
+
+    trials = TestingTrial.query.filter_by(user_id=user_id).all()
+    total_correct = sum(1 for t in trials if t.was_correct)
+    total_incorrect = sum(1 for t in trials if (t.was_correct is False and not t.was_skipped))
+    total_skipped = sum(1 for t in trials if t.was_skipped)
+    total_trials = total_correct + total_incorrect + total_skipped
+    average_gesture_accuracy = round(sum(per_gesture_accuracies) / len(per_gesture_accuracies), 1) if per_gesture_accuracies else 0.0
+
+    sessions = (
+        Session.query.filter_by(user_id=user_id, session_type="testing")
+        .order_by(Session.started_at.desc())
+        .all()
+    )
+    search_lower = (search or "").strip().lower()
+    session_payload = []
+    for sess in sessions:
+        sess_trials = sorted(sess.testing_trials, key=lambda t: (t.display_order or 0, t.id))
+        correct = sum(1 for t in sess_trials if t.was_correct)
+        incorrect = sum(1 for t in sess_trials if (t.was_correct is False and not t.was_skipped))
+        skipped = sum(1 for t in sess_trials if t.was_skipped)
+        total = correct + incorrect + skipped
+        accuracy = round((correct / total) * 100, 1) if total else 0.0
+
+        by_gesture = {}
+        for trial in sess_trials:
+            key = trial.ground_truth or (trial.gesture.gesture_name if trial.gesture else "Unknown")
+            bucket = by_gesture.setdefault(key, {
+                "name": key,
+                "correct": 0,
+                "incorrect": 0,
+                "skipped": 0,
+                "total": 0,
+                "accuracy": 0.0,
+                "misclassifiedAs": collections.Counter(),
+            })
+            if trial.was_skipped:
+                bucket["skipped"] += 1
+                bucket["total"] += 1
+            elif trial.was_correct:
+                bucket["correct"] += 1
+                bucket["total"] += 1
+            else:
+                bucket["incorrect"] += 1
+                bucket["total"] += 1
+                pred = (trial.prediction or "Unknown").strip() or "Unknown"
+                bucket["misclassifiedAs"][pred] += 1
+        gesture_rows = []
+        for gesture_name in all_gesture_names:
+            bucket = by_gesture.setdefault(gesture_name, {
+                "name": gesture_name,
+                "correct": 0,
+                "incorrect": 0,
+                "skipped": 0,
+                "total": 0,
+                "accuracy": 0.0,
+                "misclassifiedAs": collections.Counter(),
+            })
+        for bucket in by_gesture.values():
+            bucket["accuracy"] = round((bucket["correct"] / bucket["total"]) * 100, 1) if bucket["total"] else 0.0
+            bucket["misclassifiedAs"] = [
+                {"name": name, "count": count}
+                for name, count in bucket["misclassifiedAs"].most_common()
+            ]
+            gesture_rows.append(bucket)
+        gesture_rows.sort(key=lambda item: item["name"])
+
+        session_name = sess.session_name or f"Testing Session {sess.id}"
+        started_at_text = sess.started_at.isoformat() if sess.started_at else ""
+        if search_lower and search_lower not in session_name.lower() and search_lower not in started_at_text.lower():
+            continue
+
+        session_payload.append({
+            "id": sess.id,
+            "name": session_name,
+            "status": sess.status,
+            "startedAt": sess.started_at.isoformat() if sess.started_at else None,
+            "endedAt": sess.ended_at.isoformat() if sess.ended_at else None,
+            "actualDuration": sess.actual_duration,
+            "overallAccuracy": accuracy,
+            "correct": correct,
+            "incorrect": incorrect,
+            "skipped": skipped,
+            "totalScored": total,
+            "gestures": gesture_rows,
+        })
+
+    overall_accuracy = round(
+        sum(session["overallAccuracy"] for session in session_payload) / len(session_payload),
+        1,
+    ) if session_payload else 0.0
+
+    return {
+        "overallAccuracy": overall_accuracy,
+        "averageGestureAccuracy": average_gesture_accuracy,
+        "totalSessions": len(session_payload),
+        "totalTrials": total_trials,
+        "gestures": sorted(gesture_stats, key=lambda item: item["name"]),
+        "sessions": session_payload,
+    }
+
+
+@app.route("/api/progress/<int:user_id>")
+def progress_data(user_id):
+    payload = build_progress_payload(user_id, request.args.get("search", ""))
+    if payload is None:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify(payload)
+
+
+@app.route("/api/progress/sessions/<int:session_id>", methods=["PATCH"])
+def rename_progress_session(session_id):
+    data = request.get_json(silent=True) or {}
+    user_id = data.get("userId")
+    session_name = (data.get("sessionName") or "").strip()
+    if not user_id:
+        return jsonify({"error": "userId required"}), 400
+    if not session_name:
+        return jsonify({"error": "sessionName required"}), 400
+    sess = Session.query.filter_by(id=session_id, user_id=user_id, session_type="testing").first()
+    if not sess:
+        return jsonify({"error": "Session not found"}), 404
+    sess.session_name = session_name
+    db.session.commit()
+    return jsonify({"ok": True, "sessionId": sess.id, "sessionName": sess.session_name})
+
+
+@app.route("/api/progress/sessions/<int:session_id>", methods=["DELETE"])
+def delete_progress_session(session_id):
+    user_id = request.args.get("userId", type=int)
+    sess = Session.query.filter_by(id=session_id, user_id=user_id, session_type="testing").first()
+    if not sess:
+        return jsonify({"error": "Session not found"}), 404
+    db.session.delete(sess)
+    db.session.flush()
+    refresh_user_gesture_testing_stats(user_id)
+    db.session.commit()
+    return jsonify({"ok": True, "deletedSessionId": session_id})
 
 @app.route("/api/training/gestures/<int:user_id>")
 def training_gestures(user_id):
@@ -1074,11 +1495,11 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
                         db.session.add(tg)
                         ug = UserGesture.query.filter_by(user_id=user_id, gesture_id=gid).first()
                         if ug: ug.total_times_trained += 1; ug.times_trained = max(ug.times_trained, 1)
-                    gesture_names_set = list(set(c["label"] for c in collected))
+                    gesture_order = [c["label"] for c in collected]
                     db.session.add(TrainingFile(
                         user_id=user_id, session_id=sess.id, file_name=filename,
                         file_path=os.path.relpath(filepath, BASE_DIR),
-                        num_samples=len(collected), gestures=json.dumps(gesture_names_set),
+                        num_samples=len(collected), gestures=json.dumps(gesture_order),
                         created_at=ended_at))
                     db.session.commit()
                     socketio.emit("train_log", {"text": f"✓ Session saved (id={sess.id})"})

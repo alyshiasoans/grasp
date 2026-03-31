@@ -21,6 +21,7 @@ function App() {
   const [deviceError, setDeviceError] = useState('');
   const [batteryLevel, setBatteryLevel] = useState(null);
   const socketRef = useRef(null);
+  const pageOrder = ['dashboard', 'training', 'testing', 'progress'];
 
   useEffect(() => {
     const socket = io(BACKEND_URL, {
@@ -84,6 +85,12 @@ function App() {
     setShowLivePopup(false);
   };
 
+  const handleNextPage = () => {
+    const currentIndex = pageOrder.indexOf(activePage);
+    if (currentIndex === -1 || currentIndex >= pageOrder.length - 1) return;
+    setActivePage(pageOrder[currentIndex + 1]);
+  };
+
   if (!user) {
     return <LoginPage onLogin={setUser} />;
   }
@@ -141,6 +148,12 @@ function App() {
             <div style={{ display: activePage === 'progress' ? 'block' : 'none' }}>
               <ProgressPage user={user} />
             </div>
+
+            {activePage !== 'progress' && (
+              <button className="btn app-next-page-btn" onClick={handleNextPage}>
+                Next
+              </button>
+            )}
           </>
         )}
       </div>

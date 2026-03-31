@@ -71,6 +71,7 @@ class Session(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    session_name = db.Column(db.String(255))
     session_type = db.Column(db.String(20), nullable=False)  # 'training' | 'testing'
     planned_duration = db.Column(db.Float)   # seconds
     actual_duration = db.Column(db.Float)    # seconds
@@ -125,6 +126,7 @@ class ModelVersion(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     version_number = db.Column(db.Integer, nullable=False)
+    model_name = db.Column(db.String(255))
     training_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     accuracy = db.Column(db.Float)
     file_path = db.Column(db.String(500))

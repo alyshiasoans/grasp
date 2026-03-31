@@ -16,6 +16,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 import joblib
 from datetime import datetime, timezone
+from werkzeug.utils import secure_filename
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -216,7 +217,7 @@ def process_mat(mat_path, gesture_order):
     return X_feat, y_windows, gesture_interval_ids
 
 
-def train_model(training_file_rows, user, on_log=None):
+def train_model(training_file_rows, user, model_name=None, on_log=None):
     """
     Train an LDA model from a list of training file DB rows.
 
@@ -282,7 +283,8 @@ def train_model(training_file_rows, user, on_log=None):
     os.makedirs(models_dir, exist_ok=True)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_filename = f"{user['username']}_{ts}.pkl"
+    base_name = secure_filename(model_name or "") or f"{user['username']}_{ts}"
+    model_filename = f"{base_name}_{ts}.pkl"
     model_path = os.path.join(models_dir, model_filename)
     joblib.dump((scaler, lda), model_path)
     log(f"Saved model → {model_filename}")
