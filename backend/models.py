@@ -73,6 +73,7 @@ class Session(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     session_name = db.Column(db.String(255))
     session_type = db.Column(db.String(20), nullable=False)  # 'training' | 'testing'
+    mode = db.Column(db.String(20))  # 'simulated' | 'live'
     planned_duration = db.Column(db.Float)   # seconds
     actual_duration = db.Column(db.Float)    # seconds
     status = db.Column(db.String(20), default="scheduled", nullable=False)  # scheduled | in_progress | completed | aborted

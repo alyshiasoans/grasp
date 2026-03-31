@@ -5,13 +5,10 @@ const API = 'http://localhost:5050';
 function AdminDashboard({ user }) {
   const [users, setUsers] = useState([]);
   const [selectedUserId, setSelectedUserId] = useState('');
+  const [selectedMode, setSelectedMode] = useState('simulated');
   const [progress, setProgress] = useState(null);
-  const [trainingFiles, setTrainingFiles] = useState([]);
   const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [selectedFileIds, setSelectedFileIds] = useState([]);
-  const [training, setTraining] = useState(false);
-  const [trainLogs, setTrainLogs] = useState([]);
   const [gestureUnlocks, setGestureUnlocks] = useState([]);
 
   // Load all users on mount
@@ -22,19 +19,17 @@ function AdminDashboard({ user }) {
       .catch(() => {});
   }, []);
 
-  // Load selected user's progress + training files + models
+  // Load selected user's progress + models
   useEffect(() => {
-    if (!selectedUserId) { setProgress(null); setTrainingFiles([]); setModels([]); setSelectedFileIds([]); setTrainLogs([]); setGestureUnlocks([]); return; }
+    if (!selectedUserId) { setProgress(null); setModels([]); setGestureUnlocks([]); return; }
     setLoading(true);
     Promise.all([
       fetch(`${API}/api/dashboard/${selectedUserId}`).then((r) => r.json()),
-      fetch(`${API}/api/admin/training-files/${selectedUserId}`).then((r) => r.json()),
       fetch(`${API}/api/admin/models/${selectedUserId}`).then((r) => r.json()),
       fetch(`${API}/api/admin/gestures/${selectedUserId}`).then((r) => r.json()),
     ])
-      .then(([dashData, filesData, modelsData, gesturesData]) => {
+      .then(([dashData, modelsData, gesturesData]) => {
         setProgress(dashData);
-        setTrainingFiles(filesData);
         setModels(modelsData);
         setGestureUnlocks(gesturesData);
         setLoading(false);
@@ -57,49 +52,20 @@ function AdminDashboard({ user }) {
       .catch(() => {});
   };
 
-  const toggleFileSelection = (fileId) => {
-    setSelectedFileIds((prev) =>
-      prev.includes(fileId) ? prev.filter((id) => id !== fileId) : [...prev, fileId]
-    );
-  };
-
-  const selectAllFiles = () => {
-    const matFiles = trainingFiles.filter((f) => f.fileName.endsWith('.mat'));
-    if (selectedFileIds.length === matFiles.length) {
-      setSelectedFileIds([]);
-    } else {
-      setSelectedFileIds(matFiles.map((f) => f.id));
-    }
-  };
-
-  const handleTrainModel = () => {
-    if (selectedFileIds.length === 0) return;
-    setTraining(true);
-    setTrainLogs([]);
-    fetch(`${API}/api/admin/train-model`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: Number(selectedUserId), trainingFileIds: selectedFileIds }),
-    })
-      .then((r) => r.json())
-      .then((data) => {
-        setTrainLogs(data.logs || []);
-        setTraining(false);
-        if (data.modelId) {
-          // Refresh models list
-          fetch(`${API}/api/admin/models/${selectedUserId}`)
-            .then((r) => r.json())
-            .then((modelsData) => setModels(modelsData))
-            .catch(() => {});
-        }
-      })
-      .catch((err) => {
-        setTrainLogs([`Error: ${err.message}`]);
-        setTraining(false);
-      });
-  };
-
   const selectedUser = users.find((u) => u.id === Number(selectedUserId));
+  const modeLabel = selectedMode === 'live' ? 'Live EMG' : 'Simulated';
+  const modeAccuracy = selectedMode === 'live' ? (progress?.liveAccuracy ?? 0) : (progress?.simulatedAccuracy ?? 0);
+  const modeTested = (progress?.gestures || []).reduce(
+    (sum, g) => sum + (selectedMode === 'live' ? (g.liveTested || 0) : (g.simulatedTested || 0)),
+    0
+  );
+  const modeGestures = (progress?.gestures || [])
+    .filter((g) => selectedMode === 'simulated' || g.isUnlocked)
+    .map((g) => ({
+    ...g,
+    modeAccuracy: selectedMode === 'live' ? (g.liveAccuracy || 0) : (g.simulatedAccuracy || 0),
+    modeTested: selectedMode === 'live' ? (g.liveTested || 0) : (g.simulatedTested || 0),
+  }));
 
   const handleToggleUnlock = (gestureId, currentlyUnlocked) => {
     fetch(`${API}/api/admin/gestures/${selectedUserId}/unlock`, {
@@ -136,6 +102,23 @@ function AdminDashboard({ user }) {
             </option>
           ))}
         </select>
+
+        {selectedUserId && (
+          <div className="mode-toggle admin-mode-toggle">
+            <button
+              className={`btn btn-mode ${selectedMode === 'simulated' ? 'active' : ''}`}
+              onClick={() => setSelectedMode('simulated')}
+            >
+              Simulated
+            </button>
+            <button
+              className={`btn btn-mode ${selectedMode === 'live' ? 'active' : ''}`}
+              onClick={() => setSelectedMode('live')}
+            >
+              Live EMG
+            </button>
+          </div>
+        )}
       </div>
 
       {loading && <p style={{ textAlign: 'center', color: '#999' }}>Loading…</p>}
@@ -145,8 +128,12 @@ function AdminDashboard({ user }) {
           {/* Summary row */}
           <div className="admin-summary-row">
             <div className="card admin-stat-card">
-              <div className="admin-stat-value">{progress.overallAccuracy}%</div>
-              <div className="admin-stat-label">Overall Accuracy</div>
+              <div className="admin-stat-value">{modeAccuracy}%</div>
+              <div className="admin-stat-label">{modeLabel} Accuracy</div>
+            </div>
+            <div className="card admin-stat-card">
+              <div className="admin-stat-value">{modeTested}</div>
+              <div className="admin-stat-label">{modeLabel} Attempts</div>
             </div>
             <div className="card admin-stat-card">
               <div className="admin-stat-value">{progress.gesturesTrained} / {progress.totalGestures}</div>
@@ -160,24 +147,24 @@ function AdminDashboard({ user }) {
 
           {/* Gesture table */}
           <div className="card admin-table-card">
-            <h3 className="admin-table-title">Gesture Progress for {selectedUser.firstName} {selectedUser.lastName}</h3>
+            <h3 className="admin-table-title">Gesture Progress for {selectedUser.firstName} {selectedUser.lastName} ({modeLabel})</h3>
             <table className="admin-gesture-table">
               <thead>
                 <tr>
                   <th>Gesture</th>
                   <th>Times Trained</th>
-                  <th>Times Tested</th>
-                  <th>Accuracy</th>
+                  <th>{modeLabel} Tested</th>
+                  <th>{modeLabel} Accuracy</th>
                   <th>Avg Confidence</th>
                 </tr>
               </thead>
               <tbody>
-                {progress.gestures.filter((g) => g.isUnlocked).map((g) => (
+                {modeGestures.map((g) => (
                   <tr key={g.gestureId}>
                     <td>{g.name}</td>
                     <td>{g.totalTrained}</td>
-                    <td>{g.totalTested}</td>
-                    <td>{g.accuracy}%</td>
+                    <td>{g.modeTested}</td>
+                    <td>{g.modeAccuracy}%</td>
                     <td>{g.avgConfidence}%</td>
                   </tr>
                 ))}
@@ -209,7 +196,9 @@ function AdminDashboard({ user }) {
                     <td>{g.totalTrained}</td>
                     <td>{g.totalTested}</td>
                     <td style={{ textAlign: 'center' }}>
-                      {g.isUnlocked ? (
+                      {selectedMode === 'simulated' ? (
+                        <span className="admin-status-active">Unlocked</span>
+                      ) : g.isUnlocked ? (
                         <button
                           className="admin-status-active"
                           style={{ cursor: 'pointer', border: 'none', background: 'none' }}
@@ -232,71 +221,6 @@ function AdminDashboard({ user }) {
                 ))}
               </tbody>
             </table>
-          </div>
-
-          {/* Training files */}
-          <div className="card admin-table-card">
-            <h3 className="admin-table-title">Training Files</h3>
-            {trainingFiles.length === 0 ? (
-              <p style={{ color: '#999', fontSize: '0.9rem' }}>No training files found.</p>
-            ) : (
-              <>
-                <table className="admin-gesture-table">
-                  <thead>
-                    <tr>
-                      <th style={{ width: '40px', textAlign: 'center' }}></th>
-                      <th>File Name</th>
-                      <th>Date</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {trainingFiles.map((f) => {
-                      const isMat = f.fileName.endsWith('.mat');
-                      return (
-                        <tr
-                          key={f.id}
-                          className={`${selectedFileIds.includes(f.id) ? 'admin-row-active' : ''}${isMat ? ' admin-row-clickable' : ''}`}
-                          onClick={() => isMat && toggleFileSelection(f.id)}
-                        >
-                          <td style={{ textAlign: 'center' }}>
-                            {isMat ? (
-                              <input
-                                type="checkbox"
-                                className="admin-checkbox"
-                                checked={selectedFileIds.includes(f.id)}
-                                onChange={() => toggleFileSelection(f.id)}
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                            ) : null}
-                          </td>
-                          <td>{f.fileName}</td>
-                          <td>{f.createdAt ? new Date(f.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-                <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <button
-                    className="admin-set-active-btn"
-                    disabled={selectedFileIds.length === 0 || training}
-                    onClick={handleTrainModel}
-                  >
-                    {training ? 'Training…' : 'Train'}
-                  </button>
-                  {selectedFileIds.length === 0 && (
-                    <span style={{ color: '#999', fontSize: '0.85rem' }}>Select .mat files to train on</span>
-                  )}
-                </div>
-                {trainLogs.length > 0 && (
-                  <div className="admin-train-logs">
-                    {trainLogs.map((line, i) => (
-                      <div key={i}>{line}</div>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
           </div>
 
           {/* Available models */}

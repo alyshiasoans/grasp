@@ -1557,6 +1557,10 @@ body {
   margin-bottom: 18px;
 }
 
+.progress-date-input {
+  min-width: 190px;
+}
+
 @media (max-width: 700px) {
   .progress-search-row {
     flex-direction: column;
@@ -2012,10 +2016,18 @@ body {
   box-shadow: 0 0 0 3px rgba(91,106,191,0.12);
 }
 
+.admin-mode-toggle {
+  margin-top: 16px;
+  max-width: 360px;
+}
+
 .admin-summary-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 16px;
+}
+@media (max-width: 1100px) {
+  .admin-summary-row { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 700px) {
   .admin-summary-row { grid-template-columns: 1fr; }

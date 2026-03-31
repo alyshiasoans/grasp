@@ -1,6 +1,33 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
 const API = 'http://localhost:5050';
+const VANCOUVER_TZ = 'America/Vancouver';
+
+function formatSessionDateTime(value) {
+  if (!value) return 'Unknown date';
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: VANCOUVER_TZ,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(new Date(value));
+}
+
+function formatSessionDateKey(value) {
+  if (!value) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: VANCOUVER_TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date(value));
+  const year = parts.find((part) => part.type === 'year')?.value;
+  const month = parts.find((part) => part.type === 'month')?.value;
+  const day = parts.find((part) => part.type === 'day')?.value;
+  return year && month && day ? `${year}-${month}-${day}` : '';
+}
 
 function AccuracyRing({ accuracy, size = 54, stroke = 5 }) {
   const acc = Math.round(accuracy || 0);
@@ -86,7 +113,7 @@ function SessionCard({ session, userId, onRename, onDelete }) {
             onChange={(e) => setDraftName(e.target.value)}
           />
           <div className="progress-session-meta">
-            {session.startedAt ? new Date(session.startedAt).toLocaleString() : 'Unknown date'} · {session.overallAccuracy}% accuracy
+            {formatSessionDateTime(session.startedAt)} · {session.overallAccuracy}% accuracy
           </div>
         </div>
         <div className="progress-session-overall">
@@ -142,16 +169,17 @@ function SessionCard({ session, userId, onRename, onDelete }) {
   );
 }
 
-function ProgressPage({ user }) {
+function ProgressPage({ user, isActive = false }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [selectedDate, setSelectedDate] = useState('');
 
-  const loadData = async (searchValue = search) => {
+  const loadData = async () => {
     if (!user?.id) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API}/api/progress/${user.id}?search=${encodeURIComponent(searchValue)}`);
+      const res = await fetch(`${API}/api/progress/${user.id}`);
       const next = await res.json();
       setData(next);
     } catch {
@@ -165,10 +193,26 @@ function ProgressPage({ user }) {
     loadData('');
   }, [user?.id]);
 
+  useEffect(() => {
+    if (!isActive || !user?.id) return;
+    loadData();
+  }, [isActive, user?.id]);
+
   const visibleGestures = useMemo(
     () => (data?.gestures || []).filter((g) => g.isUnlocked || g.totalTested > 0 || g.correct > 0 || g.incorrect > 0 || g.skipped > 0),
     [data]
   );
+
+  const visibleSessions = useMemo(() => {
+    const text = search.trim().toLowerCase();
+    return (data?.sessions || []).filter((session) => {
+      const matchesText = !text
+        || (session.name || '').toLowerCase().includes(text)
+        || formatSessionDateTime(session.startedAt).toLowerCase().includes(text);
+      const matchesDate = !selectedDate || formatSessionDateKey(session.startedAt) === selectedDate;
+      return matchesText && matchesDate;
+    });
+  }, [data?.sessions, search, selectedDate]);
 
   const handleRenameSession = async (sessionId, sessionName) => {
     if (!user?.id || !sessionName.trim()) return;
@@ -233,16 +277,22 @@ function ProgressPage({ user }) {
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
-          <button className="btn admin-set-active-btn" onClick={() => loadData(search)}>
-            Search
+          <input
+            className="training-text-input progress-date-input"
+            type="date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
+          />
+          <button className="btn admin-status-inactive" onClick={() => setSelectedDate('')}>
+            Clear Date
           </button>
         </div>
 
         <div className="progress-session-list">
-          {data.sessions.length === 0 ? (
+          {visibleSessions.length === 0 ? (
             <p className="training-empty-text">No matching sessions found.</p>
           ) : (
-            data.sessions.map((session) => (
+            visibleSessions.map((session) => (
               <SessionCard
                 key={session.id}
                 session={session}

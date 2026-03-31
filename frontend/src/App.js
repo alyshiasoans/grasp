@@ -146,7 +146,7 @@ function App() {
             </div>
 
             <div style={{ display: activePage === 'progress' ? 'block' : 'none' }}>
-              <ProgressPage user={user} />
+              <ProgressPage user={user} isActive={activePage === 'progress'} />
             </div>
 
             {activePage !== 'progress' && (

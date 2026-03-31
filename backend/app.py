@@ -131,6 +131,10 @@ def ensure_sqlite_schema():
             cursor.execute(
                 "ALTER TABLE sessions ADD COLUMN session_name TEXT"
             )
+        if "mode" not in session_columns:
+            cursor.execute(
+                "ALTER TABLE sessions ADD COLUMN mode TEXT"
+            )
         conn.commit()
 
 
@@ -682,13 +686,15 @@ def testing_gestures(user_id):
     if not user: return jsonify({"error": "User not found"}), 404
     result = []
     for ug in user.user_gestures:
-        if not ug.is_unlocked or not ug.is_enabled: continue
         g = db.session.get(Gesture, ug.gesture_id)
-        eligible = ug.total_times_trained >= 0
+        if not g:
+            continue
+        eligible = ug.is_unlocked and ug.is_enabled and ug.total_times_trained >= 0
         result.append({
             "gestureId": g.id, "name": g.gesture_name, "image": g.gesture_image,
             "accuracy": round(ug.accuracy, 1), "totalTrained": ug.total_times_trained,
             "totalTested": ug.total_times_tested, "eligible": eligible,
+            "isUnlocked": ug.is_unlocked, "isEnabled": ug.is_enabled,
             "weight": max(1, 100 - int(ug.accuracy)) if eligible else 0,
         })
     return jsonify({"gestures": result})
@@ -760,8 +766,12 @@ def create_test_session():
     user_id = data.get("userId")
     if not user_id: return jsonify({"error": "userId required"}), 400
     started_at = datetime.now(timezone.utc)
+    session_mode = (data.get("mode") or "").strip().lower()
+    if session_mode not in {"simulated", "live"}:
+        session_mode = None
     sess = Session(
         user_id=user_id, session_type="testing",
+        mode=session_mode,
         planned_duration=data.get("plannedDuration"),
         session_name=(data.get("sessionName") or "").strip() or f"Testing Session {started_at.strftime('%Y-%m-%d %H:%M')}",
         status="in_progress", started_at=started_at,
@@ -1123,22 +1133,53 @@ def admin_train_model():
 def dashboard(user_id):
     user = db.session.get(User, user_id)
     if not user: return jsonify({"error": "User not found"}), 404
+    def summarize_trials(trials):
+        correct = sum(1 for t in trials if t.was_correct)
+        incorrect = sum(1 for t in trials if (t.was_correct is False and not t.was_skipped))
+        skipped = sum(1 for t in trials if t.was_skipped)
+        total = correct + incorrect + skipped
+        accuracy = round(correct / total * 100, 1) if total > 0 else 0.0
+        return {
+            "accuracy": accuracy,
+            "totalTested": total,
+            "correct": correct,
+            "incorrect": incorrect,
+            "skipped": skipped,
+        }
+
     gesture_stats = []
     for ug in user.user_gestures:
         g = db.session.get(Gesture, ug.gesture_id)
+        gesture_trials = TestingTrial.query.filter_by(user_id=user_id, gesture_id=ug.gesture_id).all()
+        overall_stats = summarize_trials(gesture_trials)
+        simulated_trials = [t for t in gesture_trials if (t.session.mode if t.session else None) == "simulated"]
+        live_trials = [t for t in gesture_trials if (t.session.mode if t.session else None) == "live"]
+        simulated_stats = summarize_trials(simulated_trials)
+        live_stats = summarize_trials(live_trials)
+        confidence_values = [t.confidence for t in gesture_trials if t.confidence is not None]
         gesture_stats.append({
             "gestureId": g.id, "name": g.gesture_name, "image": g.gesture_image,
-            "accuracy": round(ug.accuracy, 1), "totalTrained": ug.total_times_trained,
-            "totalTested": ug.total_times_tested, "correct": ug.correct_predictions,
-            "incorrect": ug.incorrect_predictions, "avgConfidence": round(ug.average_confidence, 1),
+            "accuracy": overall_stats["accuracy"],
+            "totalTrained": ug.total_times_trained,
+            "totalTested": overall_stats["totalTested"], "correct": overall_stats["correct"],
+            "incorrect": overall_stats["incorrect"], "skipped": overall_stats["skipped"],
+            "simulatedAccuracy": simulated_stats["accuracy"],
+            "simulatedTested": simulated_stats["totalTested"],
+            "liveAccuracy": live_stats["accuracy"],
+            "liveTested": live_stats["totalTested"],
+            "avgConfidence": round(sum(confidence_values) / len(confidence_values), 1) if confidence_values else 0.0,
             "needsRetraining": ug.needs_retraining, "isUnlocked": ug.is_unlocked,
             "isEnabled": ug.is_enabled,
         })
     unlocked        = [g for g in gesture_stats if g["isUnlocked"]]
     total_correct   = sum(g["correct"]    for g in unlocked)
     total_incorrect = sum(g["incorrect"]  for g in unlocked)
-    total_preds     = total_correct + total_incorrect
+    total_skipped   = sum(g["skipped"]    for g in unlocked)
+    total_preds     = total_correct + total_incorrect + total_skipped
     overall_acc     = round(total_correct / total_preds * 100, 1) if total_preds > 0 else 0.0
+    all_testing_trials = TestingTrial.query.filter_by(user_id=user_id).all()
+    simulated_overall = summarize_trials([t for t in all_testing_trials if (t.session.mode if t.session else None) == "simulated"])
+    live_overall = summarize_trials([t for t in all_testing_trials if (t.session.mode if t.session else None) == "live"])
     gestures_trained = sum(1 for g in unlocked if g["totalTrained"] > 0)
     recent = Session.query.filter_by(user_id=user_id).order_by(Session.started_at.desc()).limit(5).all()
     recent_sessions = [{"id": s.id, "type": s.session_type, "status": s.status,
@@ -1155,6 +1196,10 @@ def dashboard(user_id):
     if user.training_streak == 0: suggestions.append("Start a training session to begin your streak!")
     elif user.training_streak >= 3: suggestions.append(f"Nice {user.training_streak}-day streak! Keep it up.")
     return jsonify({"streak": user.training_streak, "overallAccuracy": overall_acc,
+                    "simulatedAccuracy": simulated_overall["accuracy"],
+                    "simulatedTested": simulated_overall["totalTested"],
+                    "liveAccuracy": live_overall["accuracy"],
+                    "liveTested": live_overall["totalTested"],
                     "gesturesTrained": gestures_trained, "totalGestures": len(gesture_stats),
                     "gestures": gesture_stats, "recentSessions": recent_sessions,
                     "suggestions": suggestions})

@@ -1546,7 +1546,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
       try {
         const r = await fetch(`${API}/api/testing/session`, {
           method:'POST', headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify({ userId: user?.id }),
+          body: JSON.stringify({ userId: user?.id, mode }),
         });
         sid = (await r.json()).sessionId;
       } catch (_) {}
@@ -1633,9 +1633,13 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
     }
   }, [selectedUploadFile, user?.id, uploadGestureOrder, loadTestingAssets]);
 
-  const gColor       = GESTURE_COLORS[currentGesture?.name] || '#5c5cff';
-  const eligibleGs   = gestures.filter(g => g.eligible);
-  const ineligibleGs = gestures.filter(g => !g.eligible);
+  const gColor = GESTURE_COLORS[currentGesture?.name] || '#5c5cff';
+  const eligibleGs = mode === 'simulated'
+    ? gestures.filter((g) => g.isEnabled !== false)
+    : gestures.filter((g) => g.eligible);
+  const ineligibleGs = mode === 'simulated'
+    ? []
+    : gestures.filter((g) => !g.eligible);
   const accLive      = stats.total > 0 ? Math.round(stats.correct / stats.total * 100) : null;
   const usingSelectedSimFile = mode === 'simulated' && Boolean(selectedTestFileId);
 
