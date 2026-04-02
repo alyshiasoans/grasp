@@ -95,18 +95,25 @@ function App() {
     return <LoginPage onLogin={setUser} />;
   }
 
+  const headerTitle = user?.isAdmin
+    ? activePage === 'simulation'
+      ? 'Admin Simulation'
+      : 'Admin Overview'
+    : activePage === 'training'
+      ? 'Gesture Training'
+      : activePage === 'testing'
+        ? 'Gesture Testing'
+        : activePage === 'progress'
+          ? 'Progress'
+          : 'Dashboard';
+
   return (
     <div className="app-layout">
       <Sidebar activePage={activePage} onNavigate={setActivePage} user={user} onLogout={() => { setUser(null); setActivePage('dashboard'); }} deviceStatus={deviceStatus} batteryLevel={batteryLevel} onRefreshBattery={() => socketRef.current?.emit('get_battery')} />
 
       <div className="app-main">
-        {/* Header */}
         <header className="header">
-          <h1 className="title">
-            {user?.isAdmin
-              ? 'Admin Dashboard'
-              : activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Testing' : activePage === 'progress' ? 'Progress' : 'Dashboard'}
-          </h1>
+          <h1 className="title">{headerTitle}</h1>
           {!user?.isAdmin && (
             <div className="header-right">
               <div className="header-mode-toggle">
@@ -130,7 +137,13 @@ function App() {
         </header>
 
         {user?.isAdmin ? (
-          <AdminDashboard user={user} />
+          <AdminDashboard
+            user={user}
+            activePage={activePage}
+            socket={socketRef.current}
+            connected={connected}
+            liveOpts={liveOpts}
+          />
         ) : (
           <>
             <div style={{ display: activePage === 'dashboard' ? 'block' : 'none' }}>

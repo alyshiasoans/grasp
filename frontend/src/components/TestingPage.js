@@ -1066,7 +1066,8 @@ function VotesPie({ votes }) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-export default function TestingPage({ socket, connected, user, onSessionEnd, mode = 'simulated', liveOpts = { host:'0.0.0.0', port:'45454' } }) {
+export default function TestingPage({ socket, connected, user, onSessionEnd, onResultsSaved, mode = 'simulated', liveOpts = { host:'0.0.0.0', port:'45454' } }) {
+  const advancedSimulationControls = Boolean(onResultsSaved);
 
   const [gestures,      setGestures]      = useState([]);
   const [models,        setModels]        = useState([]);
@@ -1108,10 +1109,12 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   );
   const [actHistory,  setActHistory]  = useState([]);
   const [stats,       setStats]       = useState({ correct:0, incorrect:0, skipped:0, total:0 });
+  const [lastLatencyMs, setLastLatencyMs] = useState(null);
 
   const simRef      = useRef(null);
   const simRunning  = useRef(false);
   const simResetRef = useRef(false);
+  const promptStartRef = useRef(null);
   const sessionIdRef = useRef(null);
   const sessionStatusRef = useRef('completed');
   const endingSessionRef = useRef(false);
@@ -1129,6 +1132,13 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   useEffect(() => { sessionIdRef.current = sessionId;   }, [sessionId]);
 
   useEffect(() => {
+    if (!advancedSimulationControls || mode !== 'simulated' || !backendDrivenSession) return;
+    if (phase === 'prompting' && currentGesture?.name) {
+      promptStartRef.current = performance.now();
+    }
+  }, [phase, currentGesture, advancedSimulationControls, mode, backendDrivenSession]);
+
+  useEffect(() => {
     const onFsChange = () => {
       setIsFullscreen(document.fullscreenElement === gameShellRef.current);
     };
@@ -1144,10 +1154,12 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
       .then(r => r.json())
       .then(d => {
         setGestures(d.gestures || []);
-        setUploadGestureOrder((d.gestures || []).map((g) => g.name).join(', '));
+        if (advancedSimulationControls) {
+          setUploadGestureOrder((d.gestures || []).map((g) => g.name).join(', '));
+        }
       })
       .catch(() => {});
-  }, [user?.id]);
+  }, [user?.id, advancedSimulationControls]);
 
   const gestureIdByName = useMemo(() => {
     const map = {};
@@ -1158,6 +1170,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   }, [gestures]);
 
   const loadTestingAssets = useCallback(async () => {
+    if (!advancedSimulationControls) return;
     if (!user?.id) return;
     try {
       const [modelsRes, filesRes] = await Promise.all([
@@ -1181,16 +1194,21 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
     } catch (_) {
       setAssetMessage('Unable to load testing models or files right now.');
     }
-  }, [user?.id]);
+  }, [user?.id, advancedSimulationControls]);
 
   useEffect(() => {
+    if (!advancedSimulationControls) return;
     loadTestingAssets();
-  }, [loadTestingAssets]);
+  }, [loadTestingAssets, advancedSimulationControls]);
 
   useEffect(() => {
+    if (!advancedSimulationControls) {
+      setSimGestureOrder(SIM_GESTURE_ORDER);
+      return;
+    }
     const selectedFile = testFiles.find((file) => String(file.id) === String(selectedTestFileId));
     setSimGestureOrder(selectedFile?.gestures?.length ? selectedFile.gestures : SIM_GESTURE_ORDER);
-  }, [selectedTestFileId, testFiles]);
+  }, [selectedTestFileId, testFiles, advancedSimulationControls]);
 
   // ── Pool helpers ──────────────────────────────────────────────────────────
   const buildPool = useCallback((gs, focus) => {
@@ -1236,6 +1254,12 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const handleClassification = useCallback((predicted, voteList) => {
     const gesture = curRef.current;
     if (!gesture || pendingResultRef.current || phaseRef.current === 'result') return;
+    if (advancedSimulationControls && mode === 'simulated' && backendDrivenSession && promptStartRef.current != null) {
+      const latency = performance.now() - promptStartRef.current;
+      const roundedLatency = Math.round(latency);
+      setLastLatencyMs(roundedLatency);
+      console.log(`[admin simulation] latency: ${roundedLatency} ms`);
+    }
     decisionSeqRef.current += 1;
     setPendingResult({
       token: decisionSeqRef.current,
@@ -1243,7 +1267,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
       votes: voteList || [],
       isCorrect: predicted === gesture.name,
     });
-  }, []);
+  }, [advancedSimulationControls, mode, backendDrivenSession]);
   classifyRef.current = handleClassification;
 
   // ── End session ───────────────────────────────────────────────────────────
@@ -1281,8 +1305,9 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
     if (socket) socket.emit('stop');
     if (simRef.current) { clearInterval(simRef.current); simRef.current = null; }
     await finalizeSession(status);
+    if (onResultsSaved) onResultsSaved();
     setPhase('done');
-  }, [socket, finalizeSession]);
+  }, [socket, finalizeSession, onResultsSaved]);
 
   // ── Advance to next gesture ───────────────────────────────────────────────
   const advanceToNext = useCallback(() => {
@@ -1542,6 +1567,9 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
     if (!firstGesture) return;
 
     try {
+      simRunning.current = false;
+      simResetRef.current = true;
+
       let sid = null;
       try {
         const r = await fetch(`${API}/api/testing/session`, {
@@ -1558,11 +1586,12 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
       sessionIdRef.current = sid;
       setSessionId(sid);
-      setBackendDrivenSession(mode === 'live' || (mode === 'simulated' && Boolean(selectedTestFileId)));
+      setBackendDrivenSession(mode === 'live' || (advancedSimulationControls && mode === 'simulated' && Boolean(selectedTestFileId)));
       setSimIdx(0); simIdxRef.current = 0;
       setCurrentGesture(firstGesture);
       setRetryCount(0);
       setStats({ correct:0, incorrect:0, skipped:0, total:0 });
+      setLastLatencyMs(null);
       setPrediction(null); setVotes([]); setPendingResult(null);
       setActHistory([]); setActivation(0);
       setTOnLive(Number(thresholds.tOn) || T_ON_DEFAULT);
@@ -1584,7 +1613,9 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
         }
       }, 1000);
 
-      if (socket && (mode === 'live' || selectedTestFileId)) {
+      if (socket && mode === 'live') {
+        socket.emit('start', { mode, liveOpts, userId: user?.id });
+      } else if (socket && advancedSimulationControls && selectedTestFileId) {
         socket.emit('start', {
           mode,
           liveOpts,
@@ -1600,7 +1631,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
     } catch (e) {
       console.error('Failed to start testing session:', e);
     }
-  }, [user, mode, liveOpts, gestures, focusGestures, buildPool, pickFromPool, socket, simGestureOrder, selectedModelId, selectedTestFileId, thresholds, gestureIdByName]);
+  }, [user, mode, liveOpts, gestures, focusGestures, buildPool, pickFromPool, socket, simGestureOrder, selectedModelId, selectedTestFileId, thresholds, gestureIdByName, advancedSimulationControls]);
 
   const toggleFocus = (name) =>
     setFocusGestures(p => p.includes(name) ? p.filter(n => n !== name) : [...p, name]);
@@ -1634,7 +1665,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   }, [selectedUploadFile, user?.id, uploadGestureOrder, loadTestingAssets]);
 
   const gColor = GESTURE_COLORS[currentGesture?.name] || '#5c5cff';
-  const eligibleGs = mode === 'simulated'
+  const eligibleGs = advancedSimulationControls && mode === 'simulated'
     ? gestures.filter((g) => g.isEnabled !== false)
     : gestures.filter((g) => g.eligible);
   const ineligibleGs = mode === 'simulated'
@@ -1660,9 +1691,9 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
             </label>
             {mode === 'simulated' ? (
               <div style={{ marginTop: 6, fontSize: '0.78rem', color: '#888' }}>
-                {usingSelectedSimFile
+                {advancedSimulationControls && usingSelectedSimFile
                   ? 'Simulation uses the gesture order stored with the selected test file.'
-                  : 'Simulation uses the default internal gesture order unless you choose a test file below.'}
+                  : 'Simulation uses a fixed internal gesture order.'}
               </div>
             ) : (
               <>
@@ -1705,94 +1736,98 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
             )}
           </div>
 
-          <div className="train-setup-section">
-            <label className="train-setup-label">Model</label>
-            <select
-              className="training-text-input"
-              value={selectedModelId}
-              onChange={(e) => setSelectedModelId(e.target.value)}
-            >
-              <option value="">Default / Active model</option>
-              {models.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.modelName} {model.isActive ? '(Active)' : ''}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="train-setup-section">
-            <label className="train-setup-label">Test File</label>
-            <select
-              className="training-text-input"
-              value={selectedTestFileId}
-              onChange={(e) => setSelectedTestFileId(e.target.value)}
-            >
-              <option value="">Default simulation file</option>
-              {testFiles.map((file) => (
-                <option key={file.id} value={file.id}>
-                  {file.fileName}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div className="train-setup-section" style={{ gridColumn: '1 / -1', alignItems: 'stretch' }}>
-            <label className="train-setup-label">Thresholds</label>
-            <div className="progress-search-row testing-threshold-row">
-              <div className="testing-threshold-field">
-                <div className="testing-threshold-label">T_ON</div>
-                <input
+          {advancedSimulationControls && (
+            <>
+              <div className="train-setup-section">
+                <label className="train-setup-label">Model</label>
+                <select
                   className="training-text-input"
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  value={thresholds.tOn}
-                  onChange={(e) => setThresholds((prev) => ({ ...prev, tOn: e.target.value }))}
-                  placeholder="2.0"
-                />
+                  value={selectedModelId}
+                  onChange={(e) => setSelectedModelId(e.target.value)}
+                >
+                  <option value="">Default / Active model</option>
+                  {models.map((model) => (
+                    <option key={model.id} value={model.id}>
+                      {model.modelName} {model.isActive ? '(Active)' : ''}
+                    </option>
+                  ))}
+                </select>
               </div>
-              <div className="testing-threshold-field">
-                <div className="testing-threshold-label">T_OFF</div>
-                <input
-                  className="training-text-input"
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  value={thresholds.tOff}
-                  onChange={(e) => setThresholds((prev) => ({ ...prev, tOff: e.target.value }))}
-                  placeholder="1.3"
-                />
-              </div>
-            </div>
-          </div>
 
-          <div className="train-setup-section" style={{ gridColumn:'1 / -1', alignItems:'stretch' }}>
-            <label className="train-setup-label">Upload Test File</label>
-            <div className="training-upload-panel">
-              <input
-                id="testing-mat-upload"
-                type="file"
-                accept=".mat"
-                onChange={(e) => setSelectedUploadFile(e.target.files?.[0] || null)}
-              />
-              <textarea
-                className="training-textarea"
-                value={uploadGestureOrder}
-                onChange={(e) => setUploadGestureOrder(e.target.value)}
-                rows={3}
-                placeholder="Gesture order, comma-separated"
-              />
-              <button
-                className="btn admin-set-active-btn"
-                onClick={handleUploadTestFile}
-                disabled={!selectedUploadFile || uploadingFile}
-              >
-                {uploadingFile ? 'Uploading...' : 'Upload File'}
-              </button>
-            </div>
-            {assetMessage && <div className="training-inline-message">{assetMessage}</div>}
-          </div>
+              <div className="train-setup-section">
+                <label className="train-setup-label">Test File</label>
+                <select
+                  className="training-text-input"
+                  value={selectedTestFileId}
+                  onChange={(e) => setSelectedTestFileId(e.target.value)}
+                >
+                  <option value="">Default simulation file</option>
+                  {testFiles.map((file) => (
+                    <option key={file.id} value={file.id}>
+                      {file.fileName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="train-setup-section" style={{ gridColumn: '1 / -1', alignItems: 'stretch' }}>
+                <label className="train-setup-label">Thresholds</label>
+                <div className="progress-search-row testing-threshold-row">
+                  <div className="testing-threshold-field">
+                    <div className="testing-threshold-label">T_ON</div>
+                    <input
+                      className="training-text-input"
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      value={thresholds.tOn}
+                      onChange={(e) => setThresholds((prev) => ({ ...prev, tOn: e.target.value }))}
+                      placeholder="2.0"
+                    />
+                  </div>
+                  <div className="testing-threshold-field">
+                    <div className="testing-threshold-label">T_OFF</div>
+                    <input
+                      className="training-text-input"
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      value={thresholds.tOff}
+                      onChange={(e) => setThresholds((prev) => ({ ...prev, tOff: e.target.value }))}
+                      placeholder="1.3"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="train-setup-section" style={{ gridColumn:'1 / -1', alignItems:'stretch' }}>
+                <label className="train-setup-label">Upload Test File</label>
+                <div className="training-upload-panel">
+                  <input
+                    id="testing-mat-upload"
+                    type="file"
+                    accept=".mat"
+                    onChange={(e) => setSelectedUploadFile(e.target.files?.[0] || null)}
+                  />
+                  <textarea
+                    className="training-textarea"
+                    value={uploadGestureOrder}
+                    onChange={(e) => setUploadGestureOrder(e.target.value)}
+                    rows={3}
+                    placeholder="Gesture order, comma-separated"
+                  />
+                  <button
+                    className="btn admin-set-active-btn"
+                    onClick={handleUploadTestFile}
+                    disabled={!selectedUploadFile || uploadingFile}
+                  >
+                    {uploadingFile ? 'Uploading...' : 'Upload File'}
+                  </button>
+                </div>
+                {assetMessage && <div className="training-inline-message">{assetMessage}</div>}
+              </div>
+            </>
+          )}
 
           <div className="train-setup-section">
             <label className="train-setup-label">Game Speed</label>
@@ -1830,7 +1865,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
         </div>
 
         <button className="btn btn-start train-start-btn" onClick={handleStart}
-          disabled={(mode==='live' && (!connected || eligibleGs.length===0)) || (mode==='simulated' && simGestureOrder.length===0)}>
+          disabled={mode==='live' && (!connected || eligibleGs.length===0)}>
           ▶ Start
         </button>
       </div>
@@ -1880,7 +1915,17 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
           </div>
           <div style={{ display:'flex', gap:10, justifyContent:'center', marginTop:18 }}>
             <button className="btn btn-start test-new-btn" onClick={() => {
+              simRunning.current = false;
+              simResetRef.current = true;
+              setBackendDrivenSession(false);
               setPhase('setup'); setSessionId(null); setCurrentGesture(null);
+              setSimIdx(0); simIdxRef.current = 0;
+              setCountdown(null);
+              setRetryCount(0);
+              setPrediction(null); setVotes([]); setPendingResult(null);
+              setActivation(0); setActHistory([]);
+              setGamePaused(false);
+              setLastLatencyMs(null);
               setStats({ correct:0, incorrect:0, skipped:0, total:0 });
             }}>New Session</button>
             {onSessionEnd &&
@@ -1919,9 +1964,14 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
               #{simIdx + 1}/{simGestureOrder.length}
             </span>
           )}
-          {mode === 'live' && (
+          {advancedSimulationControls && mode === 'live' && (
             <span style={{ color:'#555', fontSize:'0.7rem', fontFamily:'monospace' }}>
               T_ON={tOnLive} T_OFF={tOffLive}
+            </span>
+          )}
+          {advancedSimulationControls && mode === 'simulated' && backendDrivenSession && lastLatencyMs != null && (
+            <span style={{ color:'#555', fontSize:'0.7rem', fontFamily:'monospace' }}>
+              latency {lastLatencyMs} ms
             </span>
           )}
         </div>
