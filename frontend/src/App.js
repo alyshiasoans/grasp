@@ -98,7 +98,7 @@ function App() {
           <h1 className="title">
             {user?.isAdmin
               ? 'Admin Dashboard'
-              : activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Testing' : activePage === 'progress' ? 'Progress' : 'Dashboard'}
+              : activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Practice' : activePage === 'progress' ? 'Progress' : 'Dashboard'}
           </h1>
           {!user?.isAdmin && (
             <div className="header-right">
