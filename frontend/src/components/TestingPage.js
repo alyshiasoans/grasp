@@ -1632,11 +1632,11 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
               #{simIdx + 1}/{SIM_GESTURE_ORDER.length}
             </span>
           )}
-          {mode === 'live' && (
+          {/* {mode === 'live' && (
             <span style={{ color:'#555', fontSize:'0.7rem', fontFamily:'monospace' }}>
               T_ON={tOnLive} T_OFF={tOffLive}
             </span>
-          )}
+          )} */}
         </div>
         <SensorStatusBar channels={channels} />
         <div style={{ display:'flex', gap:8, alignItems:'center', flexShrink:0 }}>
