@@ -44,10 +44,10 @@ const GESTURE_COLORS = {
 const ALL_GESTURES = Object.keys(GESTURE_COLORS);
 
 const GESTURE_IMAGES = {
-  'Open':'/gestures/open.jpg',            'Close':'/gestures/close.jpg',
-  'Thumbs Up':'/gestures/thumbs_up.jpg',  'Peace':'/gestures/peace.jpg',
-  'Index Point':'/gestures/index_point.jpg', 'Four':'/gestures/four.jpg',
-  'Okay':'/gestures/okay.jpg',            'Spiderman':'/gestures/spiderman.jpg',
+  'Open':'/gestures/open.png',            'Close':'/gestures/close.png',
+  'Thumbs Up':'/gestures/thumbs_up.png',  'Peace':'/gestures/peace.png',
+  'Index Point':'/gestures/index_point.png', 'Four':'/gestures/four.png',
+  'Okay':'/gestures/okay.png',            'Spiderman':'/gestures/spiderman.png',
 };
 
 const SIM_GESTURE_ORDER = [
@@ -66,7 +66,7 @@ const BR                     = 12;
 const PW                     = 68;
 const GAP_H                  = 110;
 const BASE_SPEED             = 1.5;
-const NORMAL_PIPE_INTERVAL_S = 6;
+const NORMAL_PIPE_INTERVAL_S = 4;
 const PIPE_SPACING           = BASE_SPEED * 60 * NORMAL_PIPE_INTERVAL_S;
 const EVAL_X                 = BX + BR + 4;
 const MARGIN                 = 18;
@@ -1417,7 +1417,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
         }
       }, 1000);
 
-      if (socket && mode === 'live') socket.emit('start', { mode:'live', liveOpts, userId: user?.id });
+      if (socket && mode === 'live') socket.emit('start', { mode:'live', liveOpts, userId: user?.id }); //CHANGE???
     } catch (e) {
       console.error('Failed to start testing session:', e);
     }
@@ -1453,7 +1453,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   if (phase === 'setup') return (
     <div className="testing-page" style={{ maxWidth:920, margin:'0 auto', padding:'0 0 40px' }}>
       <div className="card test-setup-card">
-        <h3 className="dashboard-card-title">Test Session Setup</h3>
+        <h3 className="dashboard-card-title">Practice Session Setup</h3>
         <div className="train-setup-grid">
 
           <div className="train-setup-section" style={{ gridColumn:'1 / -1' }}>
@@ -1654,7 +1654,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
           {GESTURE_IMAGES[currentGesture.name] && (
             <img src={GESTURE_IMAGES[currentGesture.name]} alt={currentGesture.name}
               style={{ width:70, height:70, objectFit:'cover', borderRadius:10,
-                border:`2px solid ${gColor}55`, flexShrink:0 }} />
+                border:'none', flexShrink:0 }} />
           )}
           <div style={{ minWidth:0 }}>
             <div style={{ fontSize:'0.72rem', color:'#888', fontFamily:'monospace', letterSpacing:1.2 }}>
@@ -1686,7 +1686,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
                 {GESTURE_IMAGES[pendingResult.predicted] && (
                   <img src={GESTURE_IMAGES[pendingResult.predicted]} alt={pendingResult.predicted}
                     style={{ width:36, height:36, objectFit:'cover', borderRadius:6,
-                      border:`2px solid ${predGestureCol}66` }} />
+                      border:'none' }} />
                 )}
                 <div>
                   <div style={{ fontSize:'0.6rem', color:'#666', fontFamily:'monospace', letterSpacing:1 }}>
