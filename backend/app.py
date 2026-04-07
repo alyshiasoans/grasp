@@ -399,15 +399,9 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
     win_s    = int(WIN_MS      / 1000 * Fs)
     max_g    = int(MAX_GESTURE_S * Fs)
 
-    # ── Calibration / threshold state ────────────────────────────────────
-    hint_buf    = []
-    hint_done   = False
-    hint_needed = int(CALIB_HINT_S * Fs)
-
-    # Local thresholds — start with globals, auto-calibrate for live mode
+    # ── Thresholds (hardcoded) ─────────────────────────────────────────
     t_on  = T_ON_ABS
     t_off = T_OFF_ABS
-    auto_calib = (mode == "live")   # auto-calibrate from rest for live data
 
     # ── Detection state ───────────────────────────────────────────────────
     det_buf     = deque(maxlen=det_win)
@@ -424,15 +418,8 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
     sig_flex = []
     sig_ext  = []
 
-    if auto_calib:
-        socketio.emit("log", {"text": f"Calibrating thresholds from {CALIB_HINT_S}s rest…"})
-        socketio.emit("state", {"label": "CALIBRATING", "gesture": "—", "color": "#e040fb", "act": 0.0})
-    elif PRINT_CALIB_HINT:
-        socketio.emit("log", {"text": f"HINT MODE: collecting {CALIB_HINT_S}s rest baseline…"})
-        socketio.emit("state", {"label": "HINT MODE", "gesture": "—", "color": "#e040fb", "act": 0.0})
-    else:
-        socketio.emit("log", {"text": f"✓  ready — T_ON={t_on}  T_OFF={t_off}  (absolute RMS)"})
-        socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
+    socketio.emit("log", {"text": f"✓  ready — T_ON={t_on}  T_OFF={t_off}  (absolute RMS)"})
+    socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
 
     # ── Main sample loop ──────────────────────────────────────────────────
     for raw in source.stream():
@@ -445,27 +432,6 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
             test_sample_counter += 1
 
         filtered = filt(raw - np.mean(raw))
-
-        # ── Auto-calibration / calibration hint (non-blocking) ─────────────
-        if (auto_calib or PRINT_CALIB_HINT) and not hint_done:
-            hint_buf.append(filtered)
-            if len(hint_buf) >= hint_needed:
-                arr       = np.stack(hint_buf, axis=1)
-                rest_mean = np.sqrt(np.mean(arr ** 2, axis=1))
-                med       = float(np.median(rest_mean))
-                suggested_on  = round(2.4 * med, 2)
-                suggested_off = round(1.6 * med, 2)
-                msg = (f"CALIB: median rest RMS={med:.4f}  "
-                       f"→ T_ON={suggested_on}  T_OFF={suggested_off}")
-                print(f"\n{'='*55}\n  {msg}\n{'='*55}\n")
-                socketio.emit("log", {"text": msg})
-                if auto_calib:
-                    t_on  = suggested_on
-                    t_off = suggested_off
-                    socketio.emit("log", {"text": f"✓  thresholds set — T_ON={t_on}  T_OFF={t_off}"})
-                    socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
-                hint_done = True
-            # Fall through — keep classifying with current thresholds
 
         # ── Accumulate buffers ────────────────────────────────────────────
         if state_ == 1:
