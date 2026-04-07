@@ -128,6 +128,7 @@ class ModelVersion(db.Model):
     training_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     accuracy = db.Column(db.Float)
     file_path = db.Column(db.String(500))
+    training_file_ids = db.Column(db.Text)  # JSON list of TrainingFile IDs used
     is_active = db.Column(db.Boolean, default=False, nullable=False)
 
     user = db.relationship("User", back_populates="model_versions")

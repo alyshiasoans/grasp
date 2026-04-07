@@ -27,16 +27,19 @@ GESTURE_CLASSES = {
 }
 
 
-def process_mat(mat_path, gesture_order):
+def _process_signal(Data, Fs, gesture_order):
     """
-    Process a .mat file: filter, detect gestures, extract Hudgins features.
+    Core signal processing: filter, detect gestures via activation thresholds,
+    extract Hudgins features.
 
     Parameters
     ----------
-    mat_path : str
-        Absolute path to the .mat file.
+    Data : ndarray (n_samples, n_channels)
+        Raw EMG data with at least 64 columns.
+    Fs : float
+        Sampling frequency in Hz.
     gesture_order : list[str]
-        Ordered list of gesture names (DB canonical names) for this session.
+        Ordered list of gesture names matching the recording sequence.
 
     Returns
     -------
@@ -47,9 +50,6 @@ def process_mat(mat_path, gesture_order):
     gesture_interval_ids : ndarray (n_windows,)
         Which gesture interval each window belongs to.
     """
-    m = loadmat(mat_path)
-    Data = np.array(m["Data"], dtype=float)
-    Fs = float(np.squeeze(m["SamplingFrequency"]))
 
     # Filtering
     f_lower, f_upper, f_notch, BW_notch = 20, 450, 60, 2
@@ -216,6 +216,107 @@ def process_mat(mat_path, gesture_order):
     return X_feat, y_windows, gesture_interval_ids
 
 
+def process_mat(mat_path, gesture_order):
+    """Load a .mat file and process with activation-based detection."""
+    m = loadmat(mat_path)
+    Data = np.array(m["Data"], dtype=float)
+    Fs = float(np.squeeze(m["SamplingFrequency"]))
+    return _process_signal(Data, Fs, gesture_order)
+
+
+def process_npz(npz_path, gesture_order):
+    """Load a .npz file (continuous recording) and process.
+
+    If the file contains pre-recorded gesture_intervals (from testing sessions),
+    use those directly instead of re-running activation detection.
+    Otherwise fall back to activation-based detection (training files).
+    """
+    data = np.load(npz_path, allow_pickle=True)
+    Data = np.array(data["Data"], dtype=float)
+    Fs = float(np.squeeze(data["SamplingFrequency"]))
+
+    # Testing files include pre-recorded intervals from the backend's state machine
+    if "gesture_intervals" in data:
+        intervals = json.loads(str(data["gesture_intervals"]))
+        # Use embedded gesture_order (matches intervals exactly)
+        if "gesture_order" in data:
+            gesture_order = json.loads(str(data["gesture_order"]))
+        return _process_with_intervals(Data, Fs, gesture_order, intervals)
+
+    return _process_signal(Data, Fs, gesture_order)
+
+
+def _process_with_intervals(Data, Fs, gesture_order, intervals):
+    """Extract features using pre-recorded sample intervals (no re-detection)."""
+    n_ch = Data.shape[1]
+
+    # Filter
+    nyq = Fs / 2
+    b_bp, a_bp = butter(BUTTER_ORDER, [f_lower / nyq, f_upper / nyq], btype='band')
+    b_n, a_n = iirnotch(f_notch / nyq, f_notch / bw_notch)
+    sig_filt = np.zeros_like(Data.T)
+    for ch in range(n_ch):
+        y = lfilter(b_bp, a_bp, Data[:, ch])
+        y = lfilter(b_n, a_n, y)
+        sig_filt[ch] = y
+
+    labels = np.array([GESTURE_CLASSES[g] for g in gesture_order])
+
+    from collections import defaultdict
+    counter = defaultdict(int)
+    repetitions = []
+    for g in gesture_order:
+        counter[g] += 1
+        repetitions.append(counter[g])
+    repetitions = np.array(repetitions)
+
+    win_ms, step_ms = 200, 100
+    win_samples = int(round(win_ms / 1000 * Fs))
+    step_samples = int(round(step_ms / 1000 * Fs))
+
+    X_windows, y_windows, gesture_interval_ids = [], [], []
+
+    for gi, (s, e) in enumerate(intervals):
+        if gi >= len(labels):
+            break
+        lbl = labels[gi]
+        seg = sig_filt[:, s:e]
+        if seg.shape[1] < win_samples:
+            continue
+        starts = np.arange(0, seg.shape[1] - win_samples + 1, step_samples)
+        for st in starts:
+            w = seg[:, st:st + win_samples]
+            X_windows.append(w)
+            y_windows.append(lbl)
+            gesture_interval_ids.append(gi)
+
+    X_windows = np.array(X_windows)
+    y_windows = np.array(y_windows)
+    gesture_interval_ids = np.array(gesture_interval_ids)
+
+    def hudgins_features(window, threshold=0.01):
+        ch, N = window.shape
+        MAV = np.mean(np.abs(window), axis=1)
+        WL = np.sum(np.abs(np.diff(window, axis=1)), axis=1)
+        ZC = np.zeros(ch)
+        SSC = np.zeros(ch)
+        for i in range(ch):
+            x = window[i]
+            ZC[i] = np.sum(
+                ((x[:-1] * x[1:]) < 0) & (np.abs(x[:-1] - x[1:]) >= threshold)
+            )
+            s1 = np.diff(x)
+            SSC[i] = np.sum(
+                ((s1[:-1] * s1[1:]) < 0)
+                & (np.abs(s1[:-1]) >= threshold)
+                & (np.abs(s1[1:]) >= threshold)
+            )
+        return np.concatenate([MAV, WL, ZC, SSC], axis=0)
+
+    X_feat = np.array([hudgins_features(w) for w in X_windows])
+    return X_feat, y_windows, gesture_interval_ids
+
+
 def train_model(training_file_rows, user, on_log=None):
     """
     Train an LDA model from a list of training file DB rows.
@@ -252,6 +353,8 @@ def train_model(training_file_rows, user, on_log=None):
 
         if file_path.endswith(".mat"):
             X, y, _ = process_mat(file_path, gesture_order)
+        elif file_path.endswith(".npz"):
+            X, y, _ = process_npz(file_path, gesture_order)
         else:
             log(f"⚠ Unsupported file type: {tf['file_name']}, skipping")
             continue

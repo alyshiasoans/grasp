@@ -311,7 +311,6 @@ function drawPipeWoodEnhanced(ctx, x, y, w, h) {
 const GAME_THEMES = {
     default: {
     name: 'Default',
-    emoji: '🎮',
     border: '#1e1e35',
 
     drawBg(ctx) {
@@ -406,7 +405,7 @@ const GAME_THEMES = {
     flashFail: 'rgba(255,64,129,',
   },
   outdoor: {
-    name: 'Outdoor', emoji: '🌿',
+    name: 'Outdoor',
     border: '#8aaa7a',
     drawBg(ctx, g) {
       const sky = ctx.createLinearGradient(0, 0, 0, GH);
@@ -462,7 +461,7 @@ const GAME_THEMES = {
   },
 
   space: {
-    name: 'Space', emoji: '🚀',
+    name: 'Space',
     border: '#2a2a55',
     drawBg(ctx, g) {
       ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, GW, GH);
@@ -524,7 +523,7 @@ const GAME_THEMES = {
   },
 
   underwater: {
-    name: 'Underwater', emoji: '🐠',
+    name: 'Underwater',
     border: '#2a6a7a',
     drawBg(ctx, g) {
       const water = ctx.createLinearGradient(0, 0, 0, GH);
@@ -601,7 +600,7 @@ const GAME_THEMES = {
   },
 
   sunset: {
-    name: 'Sunset', emoji: '🌅',
+    name: 'Sunset',
     border: '#8a5a4a',
     drawBg(ctx, g) {
       const grad = ctx.createLinearGradient(0, 0, 0, GH);
@@ -677,7 +676,7 @@ const GAME_THEMES = {
   },
 
   winter: {
-    name: 'Winter', emoji: '❄️',
+    name: 'Winter',
     border: '#8aaccc',
     drawBg(ctx, g) {
       const grad = ctx.createLinearGradient(0, 0, 0, GH);
@@ -1418,7 +1417,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
         }
       }, 1000);
 
-      if (socket && mode === 'live') socket.emit('start', { mode:'live', liveOpts });
+      if (socket && mode === 'live') socket.emit('start', { mode:'live', liveOpts, userId: user?.id });
     } catch (e) {
       console.error('Failed to start testing session:', e);
     }
@@ -1526,7 +1525,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
                   className={`btn btn-mode ${gameTheme===key?'active':''}`}
                   onClick={() => setGameTheme(key)}
                   style={{ display:'flex', alignItems:'center', gap:5, fontSize:'0.78rem' }}>
-                  <span>{t.emoji}</span> {t.name}
+                  {t.name}
                 </button>
               ))}
             </div>
@@ -1562,7 +1561,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
           letterSpacing:3, marginBottom:24 }}>GAME STARTING IN</div>
         <div style={{
           fontSize:'6rem', fontWeight:900, fontFamily:'monospace',
-          color:'#00e5ff', textShadow:'0 0 40px #00e5ff66, 0 0 80px #00e5ff22',
+          color:'#5b6abf', textShadow:'0 0 40px #5b6abf66, 0 0 80px #5b6abf22',
           animation:'pulse 1s ease-in-out infinite',
           lineHeight:1,
         }}>{countdown}</div>

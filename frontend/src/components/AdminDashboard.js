@@ -13,6 +13,8 @@ function AdminDashboard({ user }) {
   const [training, setTraining] = useState(false);
   const [trainLogs, setTrainLogs] = useState([]);
   const [gestureUnlocks, setGestureUnlocks] = useState([]);
+  const [expandedModelId, setExpandedModelId] = useState(null);
+  const [selectedModelIds, setSelectedModelIds] = useState([]);
 
   // Load all users on mount
   useEffect(() => {
@@ -57,6 +59,26 @@ function AdminDashboard({ user }) {
       .catch(() => {});
   };
 
+  const toggleModelSelection = (modelId) => {
+    setSelectedModelIds((prev) =>
+      prev.includes(modelId) ? prev.filter((id) => id !== modelId) : [...prev, modelId]
+    );
+  };
+
+  const handleDeleteModels = () => {
+    if (selectedModelIds.length === 0) return;
+    if (!window.confirm(`Delete ${selectedModelIds.length} model(s)? This cannot be undone.`)) return;
+    Promise.all(
+      selectedModelIds.map((id) =>
+        fetch(`${API}/api/admin/models/${id}`, { method: 'DELETE' }).then((r) => r.json())
+      )
+    ).then(() => {
+      setModels((prev) => prev.filter((m) => !selectedModelIds.includes(m.id)));
+      if (selectedModelIds.includes(expandedModelId)) setExpandedModelId(null);
+      setSelectedModelIds([]);
+    }).catch(() => {});
+  };
+
   const toggleFileSelection = (fileId) => {
     setSelectedFileIds((prev) =>
       prev.includes(fileId) ? prev.filter((id) => id !== fileId) : [...prev, fileId]
@@ -64,11 +86,11 @@ function AdminDashboard({ user }) {
   };
 
   const selectAllFiles = () => {
-    const matFiles = trainingFiles.filter((f) => f.fileName.endsWith('.mat'));
-    if (selectedFileIds.length === matFiles.length) {
+    const trainableFiles = trainingFiles.filter((f) => f.fileName.endsWith('.mat') || f.fileName.endsWith('.npz'));
+    if (selectedFileIds.length === trainableFiles.length) {
       setSelectedFileIds([]);
     } else {
-      setSelectedFileIds(matFiles.map((f) => f.id));
+      setSelectedFileIds(trainableFiles.map((f) => f.id));
     }
   };
 
@@ -160,7 +182,7 @@ function AdminDashboard({ user }) {
 
           {/* Gesture table */}
           <div className="card admin-table-card">
-            <h3 className="admin-table-title">Gesture Progress for {selectedUser.firstName} {selectedUser.lastName}</h3>
+            <h3 className="admin-table-title">Gesture Progress</h3>
             <table className="admin-gesture-table">
               <thead>
                 <tr>
@@ -169,35 +191,6 @@ function AdminDashboard({ user }) {
                   <th>Times Tested</th>
                   <th>Accuracy</th>
                   <th>Avg Confidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                {progress.gestures.filter((g) => g.isUnlocked).map((g) => (
-                  <tr key={g.gestureId}>
-                    <td>{g.name}</td>
-                    <td>{g.totalTrained}</td>
-                    <td>{g.totalTested}</td>
-                    <td>{g.accuracy}%</td>
-                    <td>{g.avgConfidence}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Gesture unlock management */}
-          <div className="card admin-table-card">
-            <h3 className="admin-table-title">Gesture Access</h3>
-            <p style={{ color: '#999', fontSize: '0.82rem', marginBottom: '12px' }}>
-              Gestures auto-unlock when all unlocked gestures reach {'>'}70% accuracy with {'>'}5 test trials each. You can also toggle manually.
-            </p>
-            <table className="admin-gesture-table">
-              <thead>
-                <tr>
-                  <th>Gesture</th>
-                  <th>Accuracy</th>
-                  <th>Trained</th>
-                  <th>Tested</th>
                   <th style={{ textAlign: 'center' }}>Status</th>
                 </tr>
               </thead>
@@ -205,9 +198,10 @@ function AdminDashboard({ user }) {
                 {gestureUnlocks.map((g) => (
                   <tr key={g.gestureId}>
                     <td>{g.name}</td>
-                    <td>{g.accuracy}%</td>
                     <td>{g.totalTrained}</td>
                     <td>{g.totalTested}</td>
+                    <td>{g.accuracy}%</td>
+                    <td>{g.avgConfidence ?? '—'}%</td>
                     <td style={{ textAlign: 'center' }}>
                       {g.isUnlocked ? (
                         <button
@@ -236,7 +230,7 @@ function AdminDashboard({ user }) {
 
           {/* Training files */}
           <div className="card admin-table-card">
-            <h3 className="admin-table-title">Training Files</h3>
+            <h3 className="admin-table-title">Data Files</h3>
             {trainingFiles.length === 0 ? (
               <p style={{ color: '#999', fontSize: '0.9rem' }}>No training files found.</p>
             ) : (
@@ -246,12 +240,14 @@ function AdminDashboard({ user }) {
                     <tr>
                       <th style={{ width: '40px', textAlign: 'center' }}></th>
                       <th>File Name</th>
+                      <th>Source</th>
                       <th>Date</th>
+                      <th>Time</th>
                     </tr>
                   </thead>
                   <tbody>
                     {trainingFiles.map((f) => {
-                      const isMat = f.fileName.endsWith('.mat');
+                      const isMat = f.fileName.endsWith('.mat') || f.fileName.endsWith('.npz');
                       return (
                         <tr
                           key={f.id}
@@ -270,7 +266,9 @@ function AdminDashboard({ user }) {
                             ) : null}
                           </td>
                           <td>{f.fileName}</td>
-                          <td>{f.createdAt ? new Date(f.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
+                          <td>{f.fileName.startsWith('testing_') ? 'Testing' : 'Training'}</td>
+                          <td>{f.createdAt ? new Date(f.createdAt + 'Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
+                          <td>{f.createdAt ? new Date(f.createdAt + 'Z').toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '—'}</td>
                         </tr>
                       );
                     })}
@@ -284,9 +282,6 @@ function AdminDashboard({ user }) {
                   >
                     {training ? 'Training…' : 'Train'}
                   </button>
-                  {selectedFileIds.length === 0 && (
-                    <span style={{ color: '#999', fontSize: '0.85rem' }}>Select .mat files to train on</span>
-                  )}
                 </div>
                 {trainLogs.length > 0 && (
                   <div className="admin-train-logs">
@@ -308,36 +303,88 @@ function AdminDashboard({ user }) {
               <table className="admin-gesture-table">
                 <thead>
                   <tr>
+                    <th></th>
                     <th>Version</th>
                     <th>Accuracy</th>
                     <th>File</th>
                     <th>Trained</th>
+                    <th>Time</th>
                     <th style={{ textAlign: 'center' }}>Status</th>
                   </tr>
                 </thead>
                 <tbody>
                   {models.map((m) => (
-                    <tr key={m.id}>
-                      <td>v{m.versionNumber}</td>
-                      <td>{m.accuracy != null ? `${m.accuracy}%` : '—'}</td>
-                      <td>{m.filePath || '—'}</td>
-                      <td>{m.trainingDate ? new Date(m.trainingDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
-                      <td style={{ textAlign: 'center' }}>
-                        {m.isActive ? (
-                          <span className="admin-status-active">Active</span>
-                        ) : (
-                          <button
-                            className="admin-status-inactive"
-                            onClick={() => handleSetActiveModel(m.id)}
-                          >
-                            Inactive
-                          </button>
-                        )}
-                      </td>
-                    </tr>
+                    <React.Fragment key={m.id}>
+                      <tr
+                        className={`${selectedModelIds.includes(m.id) ? 'admin-row-active' : ''} admin-row-clickable`}
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => setExpandedModelId(expandedModelId === m.id ? null : m.id)}
+                      >
+                        <td style={{ textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+                          <input
+                            type="checkbox"
+                            className="admin-checkbox"
+                            checked={selectedModelIds.includes(m.id)}
+                            onChange={() => toggleModelSelection(m.id)}
+                          />
+                        </td>
+                        <td>
+                          <span style={{ marginRight: 6, fontSize: '0.7rem', color: '#666' }}>
+                            {expandedModelId === m.id ? '▾' : '▸'}
+                          </span>
+                          v{m.versionNumber}
+                        </td>
+                        <td>{m.accuracy != null ? `${m.accuracy}%` : '—'}</td>
+                        <td>{m.filePath ? m.filePath.replace(/^models[\\/]/, '') : '—'}</td>
+                        <td>{m.trainingDate ? new Date(m.trainingDate + 'Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
+                        <td>{m.trainingDate ? new Date(m.trainingDate + 'Z').toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '—'}</td>
+                        <td style={{ textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+                          {m.isActive ? (
+                            <span className="admin-status-active">Active</span>
+                          ) : (
+                            <button
+                              className="admin-status-inactive"
+                              onClick={() => handleSetActiveModel(m.id)}
+                            >
+                              Inactive
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                      {expandedModelId === m.id && (
+                        <tr>
+                          <td colSpan={7} style={{ padding: '10px 20px 14px', background: 'transparent', borderTop: 'none' }}>
+                            <div style={{ fontSize: '0.72rem', color: '#666', fontFamily: 'monospace', letterSpacing: 0.5, marginBottom: 6 }}>
+                              TRAINED ON ({m.trainingFiles?.length || 0} files)
+                            </div>
+                            {m.trainingFiles && m.trainingFiles.length > 0
+                              ? <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                  {m.trainingFiles.map((name, i) => (
+                                    <div key={i} style={{ fontSize: '0.8rem', color: '#2d2d4e', fontFamily: 'monospace', padding: '3px 8px', background: 'rgba(91,106,191,0.08)', borderRadius: 4, border: '1px solid rgba(91,106,191,0.18)' }}>
+                                      {name}
+                                    </div>
+                                  ))}
+                                </div>
+                              : <div style={{ fontSize: '0.8rem', color: '#555', fontStyle: 'italic' }}>No file info available</div>
+                            }
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>
+            )}
+            {selectedModelIds.length > 0 && (
+              <div style={{ marginTop: '12px' }}>
+                <button
+                  className="admin-set-active-btn"
+                  style={{ background: '#c0392b' }}
+                  onClick={handleDeleteModels}
+                >
+                  Delete
+                </button>
+              </div>
             )}
           </div>
         </>

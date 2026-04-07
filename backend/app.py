@@ -106,6 +106,13 @@ training_running = False
 training_paused  = False
 training_source  = None
 
+# ── Testing signal buffer (saves raw EMG during live test sessions) ───────────
+test_sample_buffer     = []     # raw samples appended by run_worker
+test_gesture_intervals = []     # [(start_sample, end_sample, label|None), ...]
+test_session_user_id   = None
+test_session_id        = None
+test_sample_counter    = 0      # current sample index in the worker loop
+
 
 # ── Database init ─────────────────────────────────────────────────────────────
 def ensure_sqlite_schema():
@@ -116,6 +123,12 @@ def ensure_sqlite_schema():
         if "is_admin" not in user_columns:
             cursor.execute(
                 "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"
+            )
+        cursor.execute("PRAGMA table_info(model_versions)")
+        mv_columns = {row[1] for row in cursor.fetchall()}
+        if mv_columns and "training_file_ids" not in mv_columns:
+            cursor.execute(
+                "ALTER TABLE model_versions ADD COLUMN training_file_ids TEXT"
             )
         conn.commit()
 
@@ -287,28 +300,56 @@ class LiveSource:
 
 
 # ── Core worker ───────────────────────────────────────────────────────────────
-def run_worker(mode="simulated", live_opts=None):
+def run_worker(mode="simulated", live_opts=None, user_id=None):
     """
     Process EMG data and emit SocketIO updates.
     Uses absolute RMS thresholds — matches NEWREALCLASSIFIER.py exactly.
     """
-    global worker_running, active_source
+    global worker_running, active_source, test_sample_counter
     worker_running = True
     live_opts = live_opts or {}
+    test_sample_counter = 0
+    test_gesture_start  = 0
+    print(f"[worker] run_worker started, mode={mode}, user_id={user_id}")
 
     try:
         import joblib
     except ImportError:
+        print("[worker] ERROR: joblib not installed")
         socketio.emit("log", {"text": "ERROR: joblib not installed"})
         worker_running = False
         return
 
     socketio.emit("state", {"label": "LOADING...", "gesture": "—", "color": "#ffffff", "act": 0.0})
 
+    # ── Resolve model path: user's active model from DB, else fallback ────
+    model_path = MODEL_PATH  # default fallback
+    if user_id:
+        with app.app_context():
+            active_mv = ModelVersion.query.filter_by(user_id=user_id, is_active=True).first()
+            if active_mv and active_mv.file_path:
+                candidate = os.path.join(BASE_DIR, active_mv.file_path)
+                if os.path.isfile(candidate):
+                    model_path = candidate
+                    print(f"[worker] using active model for user {user_id}: {active_mv.file_path}")
+                else:
+                    print(f"[worker] active model file missing: {candidate}, trying fallback")
+            else:
+                print(f"[worker] no active model for user {user_id}, trying fallback")
+
+    if not os.path.isfile(model_path):
+        msg = f"ERROR: no model file found (looked for {model_path})"
+        print(f"[worker] {msg}")
+        socketio.emit("log", {"text": msg})
+        worker_running = False
+        return
+
     try:
-        scaler, model = joblib.load(MODEL_PATH)
-        socketio.emit("log", {"text": "✓  model loaded"})
+        scaler, model = joblib.load(model_path)
+        print(f"[worker] model loaded from {model_path}")
+        socketio.emit("log", {"text": f"✓  model loaded ({os.path.basename(model_path)})"})
     except Exception as e:
+        print(f"[worker] ERROR loading model: {e}")
         socketio.emit("log", {"text": f"ERROR loading model: {e}"})
         worker_running = False
         return
@@ -358,10 +399,15 @@ def run_worker(mode="simulated", live_opts=None):
     win_s    = int(WIN_MS      / 1000 * Fs)
     max_g    = int(MAX_GESTURE_S * Fs)
 
-    # ── Optional calibration hint state ──────────────────────────────────
+    # ── Calibration / threshold state ────────────────────────────────────
     hint_buf    = []
     hint_done   = False
     hint_needed = int(CALIB_HINT_S * Fs)
+
+    # Local thresholds — start with globals, auto-calibrate for live mode
+    t_on  = T_ON_ABS
+    t_off = T_OFF_ABS
+    auto_calib = (mode == "live")   # auto-calibrate from rest for live data
 
     # ── Detection state ───────────────────────────────────────────────────
     det_buf     = deque(maxlen=det_win)
@@ -378,11 +424,14 @@ def run_worker(mode="simulated", live_opts=None):
     sig_flex = []
     sig_ext  = []
 
-    if PRINT_CALIB_HINT:
+    if auto_calib:
+        socketio.emit("log", {"text": f"Calibrating thresholds from {CALIB_HINT_S}s rest…"})
+        socketio.emit("state", {"label": "CALIBRATING", "gesture": "—", "color": "#e040fb", "act": 0.0})
+    elif PRINT_CALIB_HINT:
         socketio.emit("log", {"text": f"HINT MODE: collecting {CALIB_HINT_S}s rest baseline…"})
         socketio.emit("state", {"label": "HINT MODE", "gesture": "—", "color": "#e040fb", "act": 0.0})
     else:
-        socketio.emit("log", {"text": f"✓  ready — T_ON={T_ON_ABS}  T_OFF={T_OFF_ABS}  (absolute RMS)"})
+        socketio.emit("log", {"text": f"✓  ready — T_ON={t_on}  T_OFF={t_off}  (absolute RMS)"})
         socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
 
     # ── Main sample loop ──────────────────────────────────────────────────
@@ -390,21 +439,33 @@ def run_worker(mode="simulated", live_opts=None):
         if not worker_running:
             break
 
+        # ── Buffer raw samples for testing .npz ──────────────────────
+        if test_session_id is not None:
+            test_sample_buffer.append(raw.copy())
+            test_sample_counter += 1
+
         filtered = filt(raw - np.mean(raw))
 
-        # ── Optional calibration hint (non-blocking) ──────────────────────
-        if PRINT_CALIB_HINT and not hint_done:
+        # ── Auto-calibration / calibration hint (non-blocking) ─────────────
+        if (auto_calib or PRINT_CALIB_HINT) and not hint_done:
             hint_buf.append(filtered)
             if len(hint_buf) >= hint_needed:
                 arr       = np.stack(hint_buf, axis=1)
                 rest_mean = np.sqrt(np.mean(arr ** 2, axis=1))
                 med       = float(np.median(rest_mean))
-                msg = (f"HINT: median rest RMS={med:.4f}  "
-                       f"→ T_ON={2.4*med:.1f}  T_OFF={1.6*med:.1f}")
+                suggested_on  = round(2.4 * med, 2)
+                suggested_off = round(1.6 * med, 2)
+                msg = (f"CALIB: median rest RMS={med:.4f}  "
+                       f"→ T_ON={suggested_on}  T_OFF={suggested_off}")
                 print(f"\n{'='*55}\n  {msg}\n{'='*55}\n")
                 socketio.emit("log", {"text": msg})
+                if auto_calib:
+                    t_on  = suggested_on
+                    t_off = suggested_off
+                    socketio.emit("log", {"text": f"✓  thresholds set — T_ON={t_on}  T_OFF={t_off}"})
+                    socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
                 hint_done = True
-            # Fall through — keep classifying with current absolute thresholds
+            # Fall through — keep classifying with current thresholds
 
         # ── Accumulate buffers ────────────────────────────────────────────
         if state_ == 1:
@@ -430,10 +491,10 @@ def run_worker(mode="simulated", live_opts=None):
         wf = sig_flex[-100:]; we = sig_ext[-100:]
         sf = len(sig_flex) - len(wf); se = len(sig_ext) - len(we)
         socketio.emit("signal", {
-            "flexors":   [{"x": sf+j, "y": round(v, 2)} for j, v in enumerate(wf)],
-            "extensors": [{"x": se+j, "y": round(v, 2)} for j, v in enumerate(we)],
-            "t_on":  T_ON_ABS,
-            "t_off": T_OFF_ABS,
+            "flexors":   [{"x": sf+j, "y": round(v, 6)} for j, v in enumerate(wf)],
+            "extensors": [{"x": se+j, "y": round(v, 6)} for j, v in enumerate(we)],
+            "t_on":  t_on,
+            "t_off": t_off,
         })
 
         log_ctr += 1
@@ -442,22 +503,25 @@ def run_worker(mode="simulated", live_opts=None):
                 "label":   "ACTIVE" if state_ else "REST",
                 "gesture": "" if state_ else "REST",
                 "color":   "#ffffff" if state_ else "#444444",
-                "act":     round(act, 2),
+                "act":     round(act, 6),
             })
 
         # ── State machine ─────────────────────────────────────────────────
         if state_ == 0:
-            if act > T_ON_ABS:
+            if act > t_on:
                 cnt_on += 1
                 if cnt_on >= N_ON:
-                    socketio.emit("state", {"label": "ACTIVE", "gesture": "", "color": "#ffffff", "act": round(act, 2)})
+                    socketio.emit("state", {"label": "ACTIVE", "gesture": "", "color": "#ffffff", "act": round(act, 6)})
                     socketio.emit("log",   {"text": "▶  gesture start"})
                     state_ = 1; gest_buf = []; votes = []; last_printed = ""; cnt_on = 0
+                    # Record gesture start sample index for testing
+                    if test_session_id is not None:
+                        test_gesture_start = test_sample_counter
             else:
                 cnt_on = 0
         else:
             gest_buf.append(filtered)
-            cnt_off = cnt_off + 1 if act < T_OFF_ABS else 0
+            cnt_off = cnt_off + 1 if act < t_off else 0
             gesture_end = (cnt_off >= N_OFF) or (len(gest_buf) >= max_g)
 
             if len(gest_buf) >= win_s:
@@ -476,7 +540,7 @@ def run_worker(mode="simulated", live_opts=None):
                 vote_names = [GESTURE_CLASSES.get(int(v), "?") for v in votes if v < len(GESTURE_CLASSES)]
                 socketio.emit("state", {
                     "label": "ACTIVE", "gesture": gname, "color": col,
-                    "act": round(act, 2), "votes": vote_names,
+                    "act": round(act, 6), "votes": vote_names,
                 })
                 if gname != last_printed:
                     socketio.emit("log", {"text": f"  → {gname}"})
@@ -484,6 +548,9 @@ def run_worker(mode="simulated", live_opts=None):
 
             if gesture_end:
                 socketio.emit("log", {"text": "■  gesture end"})
+                # Record gesture interval for testing (label=None, tagged later by trial endpoint)
+                if test_session_id is not None:
+                    test_gesture_intervals.append([test_gesture_start, test_sample_counter, None])
                 if len(votes) >= MIN_VOTES:
                     vc = np.zeros(len(GESTURE_CLASSES))
                     for v in votes:
@@ -494,11 +561,11 @@ def run_worker(mode="simulated", live_opts=None):
                     socketio.emit("log",   {"text": f"★  final: {gname}  ({len(votes)} votes)"})
                     socketio.emit("state", {
                         "label": "REST", "gesture": gname, "color": col,
-                        "act": round(act, 2), "votes": vote_names,
+                        "act": round(act, 6), "votes": vote_names,
                     })
                 else:
                     socketio.emit("log",   {"text": "  (skipped — too short)"})
-                    socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": round(act, 2)})
+                    socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": round(act, 6)})
                 state_ = 0; cnt_off = 0; votes = []
 
     if mode == "live":
@@ -508,8 +575,87 @@ def run_worker(mode="simulated", live_opts=None):
         socketio.emit("state", {"label": "DONE ✓", "gesture": "DONE", "color": "#69ff47", "act": 0.0})
         socketio.emit("log",   {"text": "— finished —"})
 
+    # ── Save testing signal if this was a live test session ─────────
+    _save_test_signal(Fs, n_ch)
+
     active_source  = None
     worker_running = False
+
+
+def _save_test_signal(Fs, n_ch):
+    """Save buffered raw EMG from a live testing session as .npz for retraining.
+
+    Each detected gesture interval is a [start_sample, end_sample, label]
+    triple.  label is a gesture name (confirmed), False (excluded), or
+    None (unresolved — session ended mid-trial).  Only confirmed
+    intervals are saved for training.
+    """
+    global test_sample_buffer, test_gesture_intervals
+    global test_session_user_id, test_session_id
+
+    sid       = test_session_id
+    uid       = test_session_user_id
+    samples   = test_sample_buffer
+    intervals = list(test_gesture_intervals)
+
+    # Clear globals regardless
+    test_sample_buffer     = []
+    test_gesture_intervals = []
+    test_session_user_id   = None
+    test_session_id        = None
+
+    if not sid or not samples:
+        return
+
+    # Keep only confirmed intervals (label is a string, not False/None)
+    confirmed = [(s, e, lbl) for s, e, lbl in intervals
+                 if isinstance(lbl, str)]
+    if not confirmed:
+        return
+
+    gesture_order       = [lbl for _, _, lbl in confirmed]
+    confirmed_intervals = [(s, e) for s, e, _ in confirmed]
+
+    try:
+        with app.app_context():
+            folder_name = None
+            if uid:
+                u = db.session.get(User, uid)
+                folder_name = u.username if u else None
+
+            user_dir = os.path.join(TRAINING_DIR, folder_name) if folder_name else TRAINING_DIR
+            os.makedirs(user_dir, exist_ok=True)
+
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"testing_{ts}.npz"
+            filepath = os.path.join(user_dir, filename)
+
+            # Save the full continuous signal, the confirmed gesture order,
+            # AND the exact sample intervals so process_npz can use them
+            # directly instead of re-running activation detection.
+            np.savez(filepath,
+                     Data=np.array(samples),
+                     SamplingFrequency=np.array(Fs),
+                     gesture_order=json.dumps(gesture_order),
+                     gesture_intervals=json.dumps(confirmed_intervals),
+                     gesture_classes=json.dumps(GESTURE_CLASSES))
+
+            db.session.add(TrainingFile(
+                user_id=uid, session_id=sid,
+                file_name=filename,
+                file_path=os.path.relpath(filepath, BASE_DIR),
+                num_samples=len(gesture_order),
+                gestures=json.dumps(gesture_order),
+                created_at=datetime.now(timezone.utc),
+            ))
+            db.session.commit()
+
+            skipped = len(intervals) - len(confirmed)
+            skip_note = f", {skipped} skipped" if skipped else ""
+            socketio.emit("log", {"text": f"\u2605 Saved testing signal \u2192 {filename} ({len(gesture_order)} gestures{skip_note}, {len(samples)} samples)"})
+    except Exception as e:
+        print(f"[test-save] error: {e}")
+        socketio.emit("log", {"text": f"\u26a0 Failed to save testing signal: {e}"})
 
 
 # ── SocketIO handlers ─────────────────────────────────────────────────────────
@@ -524,13 +670,17 @@ def on_disconnect():
 @socketio.on("start")
 def on_start(data=None):
     global worker_thread, worker_running
+    print(f"[server] 'start' event received, worker_running={worker_running}, data={data}")
     if worker_running:
+        print("[server] worker already running, ignoring start")
         socketio.emit("log", {"text": "Already running!"})
         return
     data      = data or {}
     mode      = data.get("mode", "simulated")
     live_opts = data.get("liveOpts", {})
-    worker_thread = threading.Thread(target=run_worker, args=(mode, live_opts), daemon=True)
+    user_id   = data.get("userId")
+    print(f"[server] starting worker in mode={mode}, user_id={user_id}")
+    worker_thread = threading.Thread(target=run_worker, args=(mode, live_opts, user_id), daemon=True)
     worker_thread.start()
 
 @socketio.on("stop")
@@ -685,6 +835,16 @@ def create_test_session():
         number_of_connected_channels=data.get("channels", 64),
     )
     db.session.add(sess); db.session.commit()
+
+    # Prepare testing signal buffer for this session
+    global test_sample_buffer, test_gesture_intervals
+    global test_session_user_id, test_session_id, test_sample_counter
+    test_sample_buffer     = []
+    test_gesture_intervals = []
+    test_session_user_id   = user_id
+    test_session_id        = sess.id
+    test_sample_counter    = 0
+
     return jsonify({"sessionId": sess.id})
 
 @app.route("/api/testing/trial", methods=["POST"])
@@ -695,6 +855,21 @@ def record_test_trial():
     confidence  = data.get("confidence");  ground_truth= data.get("groundTruth")
     was_correct = data.get("wasCorrect");  was_skipped = data.get("wasSkipped", False)
     retry_count = data.get("retryCount", 0); trial_number = data.get("trialNumber", 1)
+
+    # Record ground truth in test signal sequence:
+    #   "Yes" (was_correct=True)  → user DID perform the gesture → tag interval with label
+    #   "No"  (was_correct=False) → user did NOT perform it      → tag interval as excluded
+    #   "Skip"                    → may or may not have activation → tag if interval exists
+    # Tag the most recent untagged gesture interval from the worker's state machine.
+    if test_session_id is not None and test_gesture_intervals:
+        # Find the last untagged interval (label is still None)
+        for iv in reversed(test_gesture_intervals):
+            if iv[2] is None:
+                if was_correct and not was_skipped and ground_truth:
+                    iv[2] = ground_truth  # confirmed gesture
+                else:
+                    iv[2] = False  # mark as excluded (No / Skip)
+                break
 
     display_order = TestingTrial.query.filter_by(session_id=session_id).count() + 1
 
@@ -736,7 +911,9 @@ def end_test_session(session_id):
     sess.status    = data.get("status", "completed")
     sess.ended_at  = datetime.now(timezone.utc)
     if sess.started_at:
-        sess.actual_duration = (sess.ended_at - sess.started_at).total_seconds()
+        # Ensure both datetimes are offset-aware for subtraction
+        sa = sess.started_at if sess.started_at.tzinfo else sess.started_at.replace(tzinfo=timezone.utc)
+        sess.actual_duration = (sess.ended_at - sa).total_seconds()
     db.session.commit()
     return jsonify({"ok": True})
 
@@ -794,6 +971,7 @@ def admin_gestures(user_id):
             "gestureId": g.id, "name": g.gesture_name,
             "isUnlocked": ug.is_unlocked, "isEnabled": ug.is_enabled,
             "accuracy": round(ug.accuracy, 1),
+            "avgConfidence": round(ug.average_confidence * 100, 1) if ug.average_confidence else 0,
             "totalTrained": ug.total_times_trained,
             "totalTested": ug.total_times_tested,
         })
@@ -824,12 +1002,21 @@ def admin_training_files(user_id):
 @app.route("/api/admin/models/<int:user_id>")
 def admin_models(user_id):
     models = ModelVersion.query.filter_by(user_id=user_id).order_by(ModelVersion.version_number.desc()).all()
-    return jsonify([{
-        "id": m.id, "versionNumber": m.version_number,
-        "accuracy": m.accuracy, "filePath": m.file_path,
-        "trainingDate": m.training_date.isoformat() if m.training_date else None,
-        "isActive": m.is_active,
-    } for m in models])
+    result = []
+    for m in models:
+        file_ids = json.loads(m.training_file_ids) if m.training_file_ids else []
+        file_names = []
+        if file_ids:
+            tfs = TrainingFile.query.filter(TrainingFile.id.in_(file_ids)).all()
+            file_names = [tf.file_name for tf in tfs]
+        result.append({
+            "id": m.id, "versionNumber": m.version_number,
+            "accuracy": m.accuracy, "filePath": m.file_path,
+            "trainingDate": m.training_date.isoformat() if m.training_date else None,
+            "isActive": m.is_active,
+            "trainingFiles": file_names,
+        })
+    return jsonify(result)
 
 @app.route("/api/admin/models/<int:user_id>/set-active", methods=["POST"])
 def admin_set_active_model(user_id):
@@ -842,6 +1029,20 @@ def admin_set_active_model(user_id):
     mv.is_active = True
     db.session.commit()
     return jsonify({"ok": True, "activeModelId": mv.id})
+
+@app.route("/api/admin/models/<int:model_id>", methods=["DELETE"])
+def admin_delete_model(model_id):
+    mv = ModelVersion.query.get(model_id)
+    if not mv:
+        return jsonify({"error": "Model not found"}), 404
+    # delete the .pkl file from disk
+    if mv.file_path:
+        full_path = os.path.join(BASE_DIR, mv.file_path)
+        if os.path.isfile(full_path):
+            os.remove(full_path)
+    db.session.delete(mv)
+    db.session.commit()
+    return jsonify({"ok": True})
 
 @app.route("/api/admin/train-model", methods=["POST"])
 def admin_train_model():
@@ -872,7 +1073,8 @@ def admin_train_model():
     ModelVersion.query.filter_by(user_id=user_id, is_active=True).update({"is_active": False})
     mv = ModelVersion(user_id=user_id, version_number=max_ver + 1,
                       training_date=datetime.now(timezone.utc),
-                      accuracy=result["accuracy"], file_path=result["model_path"], is_active=True)
+                      accuracy=result["accuracy"], file_path=result["model_path"],
+                      training_file_ids=json.dumps(file_ids), is_active=True)
     db.session.add(mv); db.session.commit()
     logs.append(f"✓ Model v{mv.version_number} saved (id={mv.id})")
     return jsonify({"modelId": mv.id, "versionNumber": mv.version_number,
@@ -993,7 +1195,7 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
         n_r = int(REST_S * Fs)
         phases.append((s, s+n_r, "rest", None, gi+1)); s += n_r
 
-    collected = []; current_samples = []; phase_idx = 0; last_countdown = -1
+    collected = []; current_samples = []; all_samples = []; phase_idx = 0; last_countdown = -1
 
     next_gesture = sequence[0] if sequence else None
     socketio.emit("train_phase", {"phase":"rest","gesture":"Relax",
@@ -1023,6 +1225,7 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
                                               "total":total,"nextGesture":next_g})
         if phase_idx >= len(phases): break
         p = phases[phase_idx]
+        all_samples.append(raw.copy())
         if p[2] == "gesture": current_samples.append(raw.copy())
         elapsed   = (sample_i - p[0]) / Fs
         remaining = (p[1]-p[0])/Fs - elapsed
@@ -1046,10 +1249,11 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"training_{ts}.npz"
         filepath = os.path.join(user_dir, filename)
-        labels = [c["label"] for c in collected]
-        np.savez(filepath, labels=np.array(labels), Fs=np.array(Fs),
-                 gesture_classes=json.dumps(GESTURE_CLASSES),
-                 **{f"gesture_{i}": d for i,d in enumerate([c["data"] for c in collected])})
+        np.savez(filepath,
+                 Data=np.array(all_samples),
+                 SamplingFrequency=np.array(Fs),
+                 gesture_order=json.dumps(sequence),
+                 gesture_classes=json.dumps(GESTURE_CLASSES))
         socketio.emit("train_log", {"text": f"★  Saved {len(collected)} recordings → {filename}"})
         if user_id:
             try:
@@ -1074,11 +1278,10 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
                         db.session.add(tg)
                         ug = UserGesture.query.filter_by(user_id=user_id, gesture_id=gid).first()
                         if ug: ug.total_times_trained += 1; ug.times_trained = max(ug.times_trained, 1)
-                    gesture_names_set = list(set(c["label"] for c in collected))
                     db.session.add(TrainingFile(
                         user_id=user_id, session_id=sess.id, file_name=filename,
                         file_path=os.path.relpath(filepath, BASE_DIR),
-                        num_samples=len(collected), gestures=json.dumps(gesture_names_set),
+                        num_samples=len(collected), gestures=json.dumps(sequence),
                         created_at=ended_at))
                     db.session.commit()
                     socketio.emit("train_log", {"text": f"✓ Session saved (id={sess.id})"})
