@@ -1,24 +1,17 @@
 /**
  * TestingPage.jsx — EMG Rehabilitation Platform
  *
- * ABSOLUTE THRESHOLD SYSTEM (matches NEWREALCLASSIFIER.py + revised app.py)
+ * ABSOLUTE THRESHOLD SYSTEM
  * ─────────────────────────────────────────────────────────────────────────────
- * 1. T_ON_ABS / T_OFF_ABS are raw ADC RMS values, not normalised ratios.
+ * 1. T_ON_ABS / T_OFF_ABS are raw ADC RMS values (no calibration needed).
  *    They are broadcast by the backend on every `signal` event so the EMG
- *    strip always draws threshold lines at the correct absolute position.
- *    Default fallbacks (40 / 25) match NEWREALCLASSIFIER.py defaults.
+ *    strip always draws threshold lines at the correct position.
  *
- * 2. `act` in every `state` event is already the absolute median RMS, so
- *    the activation bar and ball just use it directly.
+ * 2. `act` in every `state` event is the absolute median RMS.
  *
- * 3. The `state` event now carries a `votes` array (list of gesture name
- *    strings) which is forwarded to the classification handler so the
- *    VotesPie shows real data instead of nothing.
+ * 3. The `state` event carries a `votes` array forwarded to VotesPie.
  *
- * 4. No calibration wait — backend emits REST immediately on connect.
- *
- * 5. EMG strip y-axis is scaled to T_ON_ABS * 2.5 so the threshold lines
- *    always sit at a sensible position on screen regardless of participant.
+ * 4. EMG strip y-axis is scaled to T_ON * 2.5 so threshold lines are visible.
  */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
@@ -32,9 +25,9 @@ const FAIR_THRESHOLD = 30;
 const SUCCESS_GREEN  = '#35d06e';
 const GAME_VIEW_MAX  = 1120;
 
-// Absolute RMS threshold defaults — overridden live from backend signal events
-const T_ON_DEFAULT  = 40;
-const T_OFF_DEFAULT = 25;
+// Relative threshold defaults — overridden live from backend signal events
+const T_ON_DEFAULT  = 2.4;
+const T_OFF_DEFAULT = 1.8;
 
 const GESTURE_COLORS = {
   'Open':'#00e5ff',  'Close':'#ff4081',   'Thumbs Up':'#69ff47',
@@ -66,7 +59,7 @@ const BR                     = 12;
 const PW                     = 68;
 const GAP_H                  = 110;
 const BASE_SPEED             = 1.5;
-const NORMAL_PIPE_INTERVAL_S = 4;
+const NORMAL_PIPE_INTERVAL_S = 6;
 const PIPE_SPACING           = BASE_SPEED * 60 * NORMAL_PIPE_INTERVAL_S;
 const EVAL_X                 = BX + BR + 4;
 const MARGIN                 = 18;
@@ -840,6 +833,11 @@ function FlappyBallGame({
 
   useEffect(() => {
     G.current.pipes.forEach(p => {
+      if (!p.evaluated && p.outcome) {
+        // Clear stale outcomes from classifications that arrived during overlay
+        p.outcome = null; p.predicted = null;
+        p.votes = null; p.decisionToken = null;
+      }
       if (!p.outcome) {
         p.label = targetGesture || '?';
         p.color = gestureColor || '#5c5cff';
@@ -848,7 +846,16 @@ function FlappyBallGame({
   }, [targetGesture, gestureColor]);
 
   useEffect(() => {
-    if (!decision || !decision.token) return;
+    if (!decision || !decision.token) {
+      // Decision cleared (retry / advance) — purge stale outcomes on unevaluated pipes
+      G.current.pipes.forEach(p => {
+        if (!p.evaluated && p.outcome) {
+          p.outcome = null; p.predicted = null;
+          p.votes = null; p.decisionToken = null;
+        }
+      });
+      return;
+    }
     if (lastDecisionTokenRef.current === decision.token) return;
     lastDecisionTokenRef.current = decision.token;
     const pipe = G.current.pipes.find(p => !p.evaluated && !p.outcome);
@@ -1084,6 +1091,8 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const gameShellRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
+  const phaseRef = useRef(phase);
+  useEffect(() => { phaseRef.current  = phase;          }, [phase]);
   useEffect(() => { curRef.current    = currentGesture; }, [currentGesture]);
   useEffect(() => { poolRef.current   = gesturePool;    }, [gesturePool]);
   useEffect(() => { simIdxRef.current = simIdx;         }, [simIdx]);
@@ -1163,6 +1172,8 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
   const handleClassification = useCallback((predicted, voteList) => {
     const gesture = curRef.current;
     if (!gesture || pendingResultRef.current) return;
+    // Only accept classifications while actively prompting
+    if (phaseRef.current !== 'prompting') return;
     decisionSeqRef.current += 1;
     setPendingResult({
       token: decisionSeqRef.current,
@@ -1318,12 +1329,16 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
         return n.length > 120 ? n.slice(-120) : n;
       });
 
-      // Detect ACTIVE → REST transition with a real gesture name.
-      // This is the single authoritative classification trigger for live mode.
+      // Classify as soon as prediction is available (during ACTIVE),
+      // not just on ACTIVE→REST — so the ball moves early.
       const gesture  = data.gesture || '';
       const voteList = Array.isArray(data.votes) ? data.votes : [];
       const isReal   = gesture && gesture !== 'REST' && gesture !== '—' && gesture !== '';
 
+      if (label === 'ACTIVE' && isReal) {
+        classifyRef.current(gesture, voteList);
+      }
+      // Fallback: also trigger on ACTIVE→REST in case the early one was missed
       if (lastLabel === 'ACTIVE' && label === 'REST' && isReal) {
         classifyRef.current(gesture, voteList);
       }

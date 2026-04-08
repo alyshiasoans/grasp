@@ -4,6 +4,7 @@ const NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', icon: '⊞' },
   { key: 'training', label: 'Training', icon: '⏱' },
   { key: 'testing',  label: 'Practice',  icon: '▶' },
+  { key: 'predict',  label: 'Predict',   icon: '🔮' },
   { key: 'progress', label: 'Progress',  icon: '📊' },
 ];
 

@@ -12,6 +12,8 @@ function AdminDashboard({ user }) {
   const [selectedFileIds, setSelectedFileIds] = useState([]);
   const [training, setTraining] = useState(false);
   const [trainLogs, setTrainLogs] = useState([]);
+  const [namePopup, setNamePopup] = useState(null);
+  const [popupName, setPopupName] = useState('');
   const [gestureUnlocks, setGestureUnlocks] = useState([]);
   const [expandedModelId, setExpandedModelId] = useState(null);
   const [selectedModelIds, setSelectedModelIds] = useState([]);
@@ -108,6 +110,8 @@ function AdminDashboard({ user }) {
         setTrainLogs(data.logs || []);
         setTraining(false);
         if (data.modelId) {
+          setNamePopup({ modelId: data.modelId, versionNumber: data.versionNumber });
+          setPopupName('');
           // Refresh models list
           fetch(`${API}/api/admin/models/${selectedUserId}`)
             .then((r) => r.json())
@@ -119,6 +123,24 @@ function AdminDashboard({ user }) {
         setTrainLogs([`Error: ${err.message}`]);
         setTraining(false);
       });
+  };
+
+  const handleSaveModelName = () => {
+    if (!namePopup) return;
+    const trimmed = popupName.trim();
+    if (trimmed) {
+      fetch(`${API}/api/admin/models/${namePopup.modelId}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      })
+        .then((r) => r.json())
+        .then(() => {
+          setModels((prev) => prev.map((m) => m.id === namePopup.modelId ? { ...m, name: trimmed } : m));
+        })
+        .catch(() => {});
+    }
+    setNamePopup(null);
   };
 
   const selectedUser = users.find((u) => u.id === Number(selectedUserId));
@@ -332,7 +354,7 @@ function AdminDashboard({ user }) {
                           <span style={{ marginRight: 6, fontSize: '0.7rem', color: '#666' }}>
                             {expandedModelId === m.id ? '▾' : '▸'}
                           </span>
-                          v{m.versionNumber}
+                          {m.name || `v${m.versionNumber}`}
                         </td>
                         <td>{m.accuracy != null ? `${m.accuracy}%` : '—'}</td>
                         <td>{m.filePath ? m.filePath.replace(/^models[\\/]/, '') : '—'}</td>
@@ -388,6 +410,38 @@ function AdminDashboard({ user }) {
             )}
           </div>
         </>
+      )}
+
+      {/* Name model popup */}
+      {namePopup && (
+        <div className="live-popup-overlay" onClick={() => setNamePopup(null)}>
+          <div className="card live-popup" onClick={(e) => e.stopPropagation()}>
+            <h3 className="live-popup-title" style={{ fontSize: '1.4rem' }}>Training Complete!</h3>
+            <p className="live-popup-subtitle" style={{ fontSize: '1.05rem' }}>
+              What would you like to name this model?
+            </p>
+            <div className="live-popup-fields" style={{ display: 'flex', justifyContent: 'center' }}>
+              <input
+                type="text"
+                className="live-popup-input"
+                placeholder={`v${namePopup.versionNumber}`}
+                value={popupName}
+                onChange={(e) => setPopupName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSaveModelName()}
+                autoFocus
+                style={{ fontSize: '1rem', textAlign: 'center', width: '70%' }}
+              />
+            </div>
+            <div className="live-popup-actions">
+              <button className="btn live-popup-btn-cancel" onClick={() => setNamePopup(null)}>
+                Skip
+              </button>
+              <button className="btn live-popup-btn-confirm" onClick={handleSaveModelName}>
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

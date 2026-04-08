@@ -7,6 +7,7 @@ import Dashboard from './components/Dashboard';
 import AdminDashboard from './components/AdminDashboard';
 import LoginPage from './components/LoginPage';
 import ProgressPage from './components/ProgressPage';
+import LivePredictionPage from './components/LivePredictionPage';
 
 const BACKEND_URL = 'http://localhost:5050';
 
@@ -98,7 +99,7 @@ function App() {
           <h1 className="title">
             {user?.isAdmin
               ? 'Admin Dashboard'
-              : activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Practice' : activePage === 'progress' ? 'Progress' : 'Dashboard'}
+              : activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Practice' : activePage === 'predict' ? 'Live Prediction' : activePage === 'progress' ? 'Progress' : 'Dashboard'}
           </h1>
           {!user?.isAdmin && (
             <div className="header-right">
@@ -136,6 +137,10 @@ function App() {
 
             <div style={{ display: activePage === 'testing' ? 'block' : 'none' }}>
               <TestingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
+            </div>
+
+            <div style={{ display: activePage === 'predict' ? 'block' : 'none' }}>
+              <LivePredictionPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
             </div>
 
             <div style={{ display: activePage === 'progress' ? 'block' : 'none' }}>

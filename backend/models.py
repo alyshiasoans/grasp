@@ -125,6 +125,7 @@ class ModelVersion(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
     version_number = db.Column(db.Integer, nullable=False)
+    name = db.Column(db.String(100))  # optional user-given name
     training_date = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
     accuracy = db.Column(db.Float)
     file_path = db.Column(db.String(500))

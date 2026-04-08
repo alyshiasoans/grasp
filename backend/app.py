@@ -2,13 +2,11 @@
 Flask + Flask-SocketIO backend for the EMG Gesture Classifier.
 Streams real-time classification results to a React frontend via WebSocket.
 
-THRESHOLD SYSTEM (matches NEWREALCLASSIFIER.py)
-────────────────────────────────────────────────
-act = median(RMS per channel)   ← absolute, no rest_mean division
-T_ON_ABS / T_OFF_ABS are raw ADC RMS values, same as in NEWREALCLASSIFIER.py.
-
-Set PRINT_CALIB_HINT = True once per participant to discover the right values,
-then set PRINT_CALIB_HINT = False and hardcode T_ON_ABS / T_OFF_ABS.
+THRESHOLD SYSTEM (matches RealTimeGestureClassifierUSETHIS.py)
+──────────────────────────────────────────────────────────────
+act = median(RMS_per_channel / rest_mean_per_channel)  ← ratio
+REST calibration: first REST_CALIB_S seconds compute rest_mean.
+T_ON / T_OFF are relative thresholds (2.4 / 1.8).
 """
 
 import os, sys, threading, time, random, json, sqlite3, socket, struct
@@ -48,21 +46,14 @@ GESTURE_COLORS = {
     "Okay": "#00e676", "Spiderman": "#ff1744",
 }
 
-# ── Signal processing parameters — MUST match NEWREALCLASSIFIER.py ───────────
+# ── Signal processing parameters (matches RealTimeGestureClassifierUSETHIS.py) ─
 F_LOWER, F_UPPER = 20, 450
 F_NOTCH, BW_NOTCH = 60, 2
 
-# ── Absolute RMS thresholds (same as NEWREALCLASSIFIER.py) ───────────────────
-#   act = median(RMS per channel)   ← raw ADC units, no normalisation
-#
-#   Set PRINT_CALIB_HINT = True once; the console will print suggested values.
-#   Then set PRINT_CALIB_HINT = False and paste the values below.
-#
-PRINT_CALIB_HINT = False   # set True once per participant to find thresholds
-CALIB_HINT_S     = 2.0     # seconds of rest to collect for hint
-
-T_ON_ABS  = 40    # ← replace with your participant's value
-T_OFF_ABS = 25    # ← replace with your participant's value
+# ── Detection thresholds (relative to rest baseline) ───────────────────
+T_ON   = 2.0    # activation ratio to start gesture
+T_OFF  = 1.3    # activation ratio to end gesture
+REST_CALIB_S = 2.0   # seconds of rest for baseline calibration
 
 N_ON            = 1
 N_OFF           = 1
@@ -70,7 +61,7 @@ DET_WIN_MS      = 200
 DET_STEP_MS     = 100
 WIN_MS          = 200
 MAX_GESTURE_S   = 3.5
-MIN_VOTES       = 20
+MIN_VOTES       = 3
 
 # Sessantaquattro+ command parameters
 S64_FSAMP = 2   # → 2000 Hz
@@ -113,6 +104,15 @@ test_session_user_id   = None
 test_session_id        = None
 test_sample_counter    = 0      # current sample index in the worker loop
 
+# ── Runtime-tunable config (updated via socket from Predict page) ─────────────
+runtime_config = {
+    "t_on":       T_ON,
+    "t_off":      T_OFF,
+    "min_votes":  MIN_VOTES,
+    "model_path": None,   # None = use default resolution; string = override path
+}
+MODELS_DIR = os.path.join(BASE_DIR, "models")
+
 
 # ── Database init ─────────────────────────────────────────────────────────────
 def ensure_sqlite_schema():
@@ -129,6 +129,10 @@ def ensure_sqlite_schema():
         if mv_columns and "training_file_ids" not in mv_columns:
             cursor.execute(
                 "ALTER TABLE model_versions ADD COLUMN training_file_ids TEXT"
+            )
+        if mv_columns and "name" not in mv_columns:
+            cursor.execute(
+                "ALTER TABLE model_versions ADD COLUMN name VARCHAR(100)"
             )
         conn.commit()
 
@@ -322,9 +326,12 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
 
     socketio.emit("state", {"label": "LOADING...", "gesture": "—", "color": "#ffffff", "act": 0.0})
 
-    # ── Resolve model path: user's active model from DB, else fallback ────
+    # ── Resolve model path: runtime override → user's active model → fallback ──
     model_path = MODEL_PATH  # default fallback
-    if user_id:
+    if runtime_config["model_path"] and os.path.isfile(runtime_config["model_path"]):
+        model_path = runtime_config["model_path"]
+        print(f"[worker] using runtime config model: {model_path}")
+    elif user_id:
         with app.app_context():
             active_mv = ModelVersion.query.filter_by(user_id=user_id, is_active=True).first()
             if active_mv and active_mv.file_path:
@@ -399,9 +406,14 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
     win_s    = int(WIN_MS      / 1000 * Fs)
     max_g    = int(MAX_GESTURE_S * Fs)
 
-    # ── Thresholds (hardcoded) ─────────────────────────────────────────
-    t_on  = T_ON_ABS
-    t_off = T_OFF_ABS
+    # ── Thresholds (absolute — no calibration) ─────────────────────────
+    # Read from runtime_config so they can be changed live from the Predict page
+    t_on  = runtime_config["t_on"]
+    t_off = runtime_config["t_off"]
+
+    # ── No calibration — rest_mean=1 so activation = raw median RMS ──
+    rest_mean    = np.ones(n_ch)
+    calib_done   = True
 
     # ── Detection state ───────────────────────────────────────────────────
     det_buf     = deque(maxlen=det_win)
@@ -412,13 +424,20 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
     cnt_off     = 0
     votes       = []
     last_printed= ""
-    log_ctr     = 0
 
-    # Signal strip buffers (absolute RMS per half-array)
+    # Signal strip buffers
     sig_flex = []
     sig_ext  = []
 
-    socketio.emit("log", {"text": f"✓  ready — T_ON={t_on}  T_OFF={t_off}  (absolute RMS)"})
+    # ── Throttle timers for non-critical emits ────────────────────────
+    last_signal_emit = 0.0    # time.perf_counter() of last signal emit
+    last_state_emit  = 0.0    # time.perf_counter() of last periodic state emit
+    SIGNAL_EMIT_INTERVAL = 0.25   # seconds — signal strip update rate
+    STATE_EMIT_INTERVAL  = 0.20   # seconds — periodic REST/ACTIVE status rate
+
+    print(f"[worker] skipping calibration — using absolute thresholds")
+    socketio.emit("log", {"text": "✓  No calibration — using absolute thresholds"})
+    socketio.emit("log", {"text": f"✓  T_ON={t_on}  T_OFF={t_off}  MIN_VOTES={runtime_config['min_votes']}"})
     socketio.emit("state", {"label": "REST", "gesture": "REST", "color": "#444444", "act": 0.0})
 
     # ── Main sample loop ──────────────────────────────────────────────────
@@ -445,26 +464,30 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
             continue
         det_ctr = 0
 
-        # ── Activation: absolute median RMS — no rest_mean division ──────
+        # ── Activation: relative to rest (matches RealTimeGestureClassifierUSETHIS) ──
         w   = np.stack(det_buf, axis=1)
-        act = float(np.median(np.sqrt(np.mean(w ** 2, axis=1))))
+        act = float(np.median(np.sqrt(np.mean(w ** 2, axis=1)) / rest_mean))
 
-        # Signal strip: absolute RMS for flexors (ch 0–31) and extensors (ch 32–63)
-        act_flex = float(np.median(np.sqrt(np.mean(w[:32] ** 2, axis=1))))
-        act_ext  = float(np.median(np.sqrt(np.mean(w[32:64] ** 2, axis=1))))
+        # Signal strip (ratio values) — throttled to avoid blocking classifier
+        act_flex = float(np.median(np.sqrt(np.mean(w[:32] ** 2, axis=1)) / rest_mean[:32]))
+        act_ext  = float(np.median(np.sqrt(np.mean(w[32:n_ch] ** 2, axis=1)) / rest_mean[32:n_ch]))
         sig_flex.append(act_flex)
         sig_ext.append(act_ext)
-        wf = sig_flex[-100:]; we = sig_ext[-100:]
-        sf = len(sig_flex) - len(wf); se = len(sig_ext) - len(we)
-        socketio.emit("signal", {
-            "flexors":   [{"x": sf+j, "y": round(v, 6)} for j, v in enumerate(wf)],
-            "extensors": [{"x": se+j, "y": round(v, 6)} for j, v in enumerate(we)],
-            "t_on":  t_on,
-            "t_off": t_off,
-        })
 
-        log_ctr += 1
-        if log_ctr % 5 == 0:
+        now = time.perf_counter()
+        if now - last_signal_emit >= SIGNAL_EMIT_INTERVAL:
+            last_signal_emit = now
+            wf = sig_flex[-100:]; we = sig_ext[-100:]
+            sf = len(sig_flex) - len(wf); se = len(sig_ext) - len(we)
+            socketio.emit("signal", {
+                "flexors":   [{"x": sf+j, "y": round(v, 6)} for j, v in enumerate(wf)],
+                "extensors": [{"x": se+j, "y": round(v, 6)} for j, v in enumerate(we)],
+                "t_on":  t_on,
+                "t_off": t_off,
+            })
+
+        if now - last_state_emit >= STATE_EMIT_INTERVAL:
+            last_state_emit = now
             socketio.emit("state", {
                 "label":   "ACTIVE" if state_ else "REST",
                 "gesture": "" if state_ else "REST",
@@ -473,6 +496,10 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
             })
 
         # ── State machine ─────────────────────────────────────────────────
+        # Re-read thresholds each step so live changes from Predict page apply
+        t_on  = runtime_config["t_on"]
+        t_off = runtime_config["t_off"]
+
         if state_ == 0:
             if act > t_on:
                 cnt_on += 1
@@ -496,7 +523,8 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
                 v = model.predict(scaler.transform(f.reshape(1, -1)))[0]
                 votes.append(v)
 
-            if len(votes) >= MIN_VOTES:
+            min_v = runtime_config["min_votes"]
+            if len(votes) >= min_v:
                 vc = np.zeros(len(GESTURE_CLASSES))
                 for v in votes:
                     if v < len(GESTURE_CLASSES): vc[v] += 1
@@ -517,7 +545,7 @@ def run_worker(mode="simulated", live_opts=None, user_id=None):
                 # Record gesture interval for testing (label=None, tagged later by trial endpoint)
                 if test_session_id is not None:
                     test_gesture_intervals.append([test_gesture_start, test_sample_counter, None])
-                if len(votes) >= MIN_VOTES:
+                if len(votes) >= min_v:
                     vc = np.zeros(len(GESTURE_CLASSES))
                     for v in votes:
                         if v < len(GESTURE_CLASSES): vc[v] += 1
@@ -658,6 +686,69 @@ def on_stop(_=None):
         active_source = None
     socketio.emit("log",  {"text": "Stopped by user."})
     socketio.emit("state", {"label": "STOPPED", "gesture": "—", "color": "#888888", "act": 0.0})
+
+# ── Runtime config updates from Predict page ──────────────────────────────────
+@socketio.on("update_config")
+def on_update_config(data=None):
+    data = data or {}
+    changed = []
+    if "t_on" in data:
+        runtime_config["t_on"] = float(data["t_on"])
+        changed.append(f"T_ON={runtime_config['t_on']}")
+    if "t_off" in data:
+        runtime_config["t_off"] = float(data["t_off"])
+        changed.append(f"T_OFF={runtime_config['t_off']}")
+    if "min_votes" in data:
+        runtime_config["min_votes"] = int(data["min_votes"])
+        changed.append(f"MIN_VOTES={runtime_config['min_votes']}")
+    if "model_path" in data:
+        mp = data["model_path"]
+        if mp:
+            full = os.path.join(BASE_DIR, mp) if not os.path.isabs(mp) else mp
+            if os.path.isfile(full):
+                runtime_config["model_path"] = full
+                changed.append(f"model={os.path.basename(full)}")
+            else:
+                socketio.emit("config_error", {"error": f"Model file not found: {mp}"})
+                return
+        else:
+            runtime_config["model_path"] = None
+            changed.append("model=default")
+    if changed:
+        socketio.emit("log", {"text": f"⚙  Config updated: {', '.join(changed)}"})
+    socketio.emit("config_state", {
+        "t_on": runtime_config["t_on"],
+        "t_off": runtime_config["t_off"],
+        "min_votes": runtime_config["min_votes"],
+        "model_path": os.path.basename(runtime_config["model_path"]) if runtime_config["model_path"] else None,
+    })
+
+@socketio.on("get_config")
+def on_get_config(_=None):
+    socketio.emit("config_state", {
+        "t_on": runtime_config["t_on"],
+        "t_off": runtime_config["t_off"],
+        "min_votes": runtime_config["min_votes"],
+        "model_path": os.path.basename(runtime_config["model_path"]) if runtime_config["model_path"] else None,
+    })
+
+@app.route("/api/models/list")
+def list_models():
+    """List .pkl model files. If ?userId is provided, return that user's DB models."""
+    user_id = request.args.get("userId", type=int)
+    if user_id:
+        models = ModelVersion.query.filter_by(user_id=user_id).order_by(ModelVersion.version_number.desc()).all()
+        return jsonify([{
+            "name": m.name or f"Model v{m.version_number}",
+            "filePath": m.file_path,
+            "accuracy": m.accuracy,
+            "isActive": m.is_active,
+        } for m in models])
+    # Fallback: list all .pkl files from disk
+    if not os.path.isdir(MODELS_DIR):
+        return jsonify([])
+    files = sorted([f for f in os.listdir(MODELS_DIR) if f.endswith(".pkl")])
+    return jsonify([{"name": f, "filePath": f"models/{f}", "accuracy": None, "isActive": False} for f in files])
 
 @socketio.on("check_device")
 def on_check_device(data=None):
@@ -977,6 +1068,7 @@ def admin_models(user_id):
             file_names = [tf.file_name for tf in tfs]
         result.append({
             "id": m.id, "versionNumber": m.version_number,
+            "name": m.name,
             "accuracy": m.accuracy, "filePath": m.file_path,
             "trainingDate": m.training_date.isoformat() if m.training_date else None,
             "isActive": m.is_active,
@@ -1009,6 +1101,17 @@ def admin_delete_model(model_id):
     db.session.delete(mv)
     db.session.commit()
     return jsonify({"ok": True})
+
+@app.route("/api/admin/models/<int:model_id>/rename", methods=["POST"])
+def admin_rename_model(model_id):
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip() or None
+    mv = ModelVersion.query.get(model_id)
+    if not mv:
+        return jsonify({"error": "Model not found"}), 404
+    mv.name = name
+    db.session.commit()
+    return jsonify({"ok": True, "name": mv.name})
 
 @app.route("/api/admin/train-model", methods=["POST"])
 def admin_train_model():
@@ -1125,7 +1228,7 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
     gesture_names = [g.gesture_name for g in db_gestures] or list(GESTURE_CLASSES.values())
 
     available_time = session_minutes * 60 - INITIAL_REST_S
-    reps_per = max(1, int(available_time / (GESTURE_S + REST_S)) // len(gesture_names))
+    reps_per = max(1, round(available_time / (GESTURE_S + REST_S) / len(gesture_names)))
     sequence = gesture_names * reps_per
     random.shuffle(sequence)
     total = len(sequence)
@@ -1151,54 +1254,99 @@ def run_training_collector(mode="live", live_opts=None, user_id=None,
     training_source = source
     Fs = source.Fs
 
-    phases = []
-    s = 0
-    n_init = int(INITIAL_REST_S * Fs)
-    phases.append((s, s+n_init, "rest", None, 0)); s += n_init
+    # ── Build phase schedule (wall-clock durations) ───────────────────
+    phase_schedule = []   # (duration_s, type, gesture_name, index)
+    phase_schedule.append((INITIAL_REST_S, "rest", None, 0))
     for gi, gname in enumerate(sequence):
-        n_g = int(GESTURE_S * Fs)
-        phases.append((s, s+n_g, "gesture", gname, gi+1)); s += n_g
-        n_r = int(REST_S * Fs)
-        phases.append((s, s+n_r, "rest", None, gi+1)); s += n_r
+        phase_schedule.append((GESTURE_S, "gesture", gname, gi+1))
+        phase_schedule.append((REST_S, "rest", None, gi+1))
 
-    collected = []; current_samples = []; all_samples = []; phase_idx = 0; last_countdown = -1
+    # ── Shared state between collector thread and timer thread ────────
+    lock = threading.Lock()
+    all_samples = []
+    collected = []
+    current_label = [None]       # mutable slot for current gesture label
+    current_samples = []         # samples for current gesture phase
+    phase_i = [0]
 
-    next_gesture = sequence[0] if sequence else None
-    socketio.emit("train_phase", {"phase":"rest","gesture":"Relax",
-                                  "countdown":int(INITIAL_REST_S),"index":0,
-                                  "total":total,"nextGesture":next_gesture})
+    # ── Timer thread: drives UI phases/countdown independently ────────
+    SIG_EMIT_INTERVAL = 0.25
 
-    for sample_i, raw in enumerate(source.stream()):
-        if not training_running: break
-        while phase_idx < len(phases) and sample_i >= phases[phase_idx][1]:
-            old = phases[phase_idx]
-            if old[2] == "gesture" and current_samples:
-                collected.append({"label": old[3], "data": np.array(current_samples)})
-                socketio.emit("train_log", {"text": f"  ✓ Recorded {old[3]} ({len(current_samples)} samples)"})
-                current_samples = []
-            phase_idx += 1; last_countdown = -1
-            if phase_idx >= len(phases): break
-            new = phases[phase_idx]
-            if new[2] == "gesture":
-                socketio.emit("train_phase", {"phase":"gesture","gesture":new[3],
-                                              "countdown":int(GESTURE_S),"index":new[4],
+    def _phase_timer():
+        for pi, (dur, ptype, gname, idx) in enumerate(phase_schedule):
+            if not training_running: break
+            phase_i[0] = pi
+
+            # Tell sample loop what to label
+            with lock:
+                if ptype == "gesture":
+                    current_label[0] = gname
+                else:
+                    current_label[0] = None
+
+            # Emit phase to frontend
+            if ptype == "gesture":
+                socketio.emit("train_phase", {"phase":"gesture","gesture":gname,
+                                              "countdown":int(dur),"index":idx,
                                               "total":total,"nextGesture":None})
-                socketio.emit("train_log", {"text": f"▶  [{new[4]}/{total}] {new[3]}"})
+                socketio.emit("train_log", {"text": f"▶  [{idx}/{total}] {gname}"})
             else:
-                next_g = next((fp[3] for fp in phases[phase_idx+1:] if fp[2]=="gesture"), None)
+                next_g = None
+                for fp in phase_schedule[pi+1:]:
+                    if fp[1] == "gesture":
+                        next_g = fp[2]; break
                 socketio.emit("train_phase", {"phase":"rest","gesture":"Relax",
-                                              "countdown":int(REST_S),"index":new[4],
+                                              "countdown":int(dur),"index":idx,
                                               "total":total,"nextGesture":next_g})
-        if phase_idx >= len(phases): break
-        p = phases[phase_idx]
-        all_samples.append(raw.copy())
-        if p[2] == "gesture": current_samples.append(raw.copy())
-        elapsed   = (sample_i - p[0]) / Fs
-        remaining = (p[1]-p[0])/Fs - elapsed
-        cd = max(int(remaining)+1, 0)
-        if cd != last_countdown:
-            last_countdown = cd
-            socketio.emit("train_countdown", {"countdown": cd})
+
+            # Wait for phase duration, emitting signal strip periodically
+            phase_start = time.perf_counter()
+            last_sig = phase_start
+            while time.perf_counter() - phase_start < dur:
+                if not training_running: return
+                # Signal strip emit
+                now = time.perf_counter()
+                if now - last_sig >= SIG_EMIT_INTERVAL:
+                    last_sig = now
+                    with lock:
+                        n = len(all_samples)
+                    if n > 0:
+                        win = max(1, int(Fs * 0.05))
+                        with lock:
+                            snap = all_samples[-win:]
+                        if snap:
+                            w = np.column_stack(snap)
+                            half = w.shape[0] // 2
+                            rms_flex = float(np.median(np.sqrt(np.mean(w[:half]**2, axis=1))))
+                            rms_ext  = float(np.median(np.sqrt(np.mean(w[half:]**2, axis=1))))
+                            socketio.emit("train_signal", {
+                                "rms_flex": round(rms_flex, 6),
+                                "rms_ext":  round(rms_ext, 6),
+                            })
+                time.sleep(0.05)
+
+            # Phase ended — finalize gesture data
+            if ptype == "gesture":
+                with lock:
+                    current_label[0] = None
+                    if current_samples:
+                        collected.append({"label": gname, "data": np.array(current_samples)})
+                        socketio.emit("train_log", {"text": f"  ✓ Recorded {gname} ({len(current_samples)} samples)"})
+                        current_samples.clear()
+
+    timer_thread = threading.Thread(target=_phase_timer, daemon=True)
+    timer_thread.start()
+
+    # ── Sample loop: just store data, nothing else ────────────────────
+    for raw in source.stream():
+        if not training_running: break
+        s = raw.copy()
+        with lock:
+            all_samples.append(s)
+            if current_label[0] is not None:
+                current_samples.append(s)
+
+    timer_thread.join(timeout=2)
 
     ended_at = datetime.now(timezone.utc)
     n_ch = source.n_channels if hasattr(source, 'n_channels') else 64
@@ -1305,4 +1453,4 @@ def on_train_stop(_=None):
 
 if __name__ == "__main__":
     print("[server] starting on http://localhost:5050")
-    socketio.run(app, host="0.0.0.0", port=5050, debug=False)
+    socketio.run(app, host="0.0.0.0", port=5050, debug=False, allow_unsafe_werkzeug=True)

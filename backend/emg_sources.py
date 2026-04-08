@@ -40,23 +40,34 @@ class SimulatedSource:
         self._paused = False
 
     def stream(self):
-        """Yield (sample_array,) one at a time at real-time pace."""
-        dt = 1.0 / (self.Fs * self.playback_speed)
+        """Yield (sample_array,) one at a time at real-time pace.
+
+        Uses batched sleep + spin-wait to beat Windows ~15 ms timer
+        resolution while keeping CPU usage low.
+        """
+        speed = self.playback_speed
+        BATCH = max(1, int(self.Fs * 0.016))  # ~16 ms of samples per batch
         t_start = time.perf_counter()
+
         for i, row in enumerate(self.sig):
             if self._stop:
                 break
-            # Block while paused, adjusting t_start so timing stays correct
             while self._paused and not self._stop:
                 time.sleep(0.05)
-                t_start = time.perf_counter() - i * dt
+                t_start = time.perf_counter() - i / (self.Fs * speed)
             if self._stop:
                 break
             yield row
-            target = t_start + (i + 1) * dt
-            rem = target - time.perf_counter()
-            if rem > 0:
-                time.sleep(rem)
+
+            # Pace at batch boundaries
+            if (i + 1) % BATCH == 0:
+                target = t_start + (i + 1) / (self.Fs * speed)
+                rem = target - time.perf_counter()
+                if rem > 0.002:
+                    time.sleep(rem - 0.001)   # coarse sleep, leave 1ms margin
+                # Spin-wait the remainder for precise timing
+                while time.perf_counter() < target:
+                    pass
 
     @property
     def rest_data(self):
