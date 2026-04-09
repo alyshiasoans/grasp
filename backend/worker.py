@@ -519,7 +519,7 @@ def run_training_collector(app, socketio, mode="live", live_opts=None,
     ended_at = datetime.now(timezone.utc)
     n_ch = source.n_channels if hasattr(source, 'n_channels') else 64
 
-    if collected:
+    if collected and mode == "live":
         if user_id:
             with app.app_context():
                 u = db.session.get(User, user_id)
