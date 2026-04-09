@@ -495,6 +495,11 @@ def run_training_collector(app, socketio, mode="live", live_opts=None,
                         socketio.emit("train_log", {"text": f"  ✓ Recorded {gname} ({len(current_samples)} samples)"})
                         current_samples.clear()
 
+        # All phases done — stop the sample loop
+        state.training_running = False
+        if state.training_source:
+            state.training_source.stop()
+
     timer_thread = threading.Thread(target=_phase_timer, daemon=True)
     timer_thread.start()
 
@@ -578,9 +583,10 @@ def run_training_collector(app, socketio, mode="live", live_opts=None,
                     socketio.emit("train_log", {"text": f"✓ Session saved (id={sess.id})"})
             except Exception as e:
                 socketio.emit("train_log", {"text": f"⚠ DB error: {e}"})
+        socketio.emit("train_log", {"text": "✓ Training session complete!"})
         socketio.emit("train_done", {"filename": filename, "count": len(collected)})
     else:
-        socketio.emit("train_log", {"text": "No data collected."})
+        socketio.emit("train_log", {"text": "✓ Training session complete!"})
         socketio.emit("train_done", {"filename": None, "count": 0})
 
     state.training_source = None

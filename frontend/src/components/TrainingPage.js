@@ -49,9 +49,13 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
       setLogs((prev) => [...prev, data.text].slice(-80));
     };
     const onDone = () => {
-      setCollecting(false);
+      setPhase({ phase: 'done', gesture: 'Training Complete!', countdown: 0, index: 0, total: 0 });
+      setCountdown(0);
       setPaused(false);
-      setPhase(null);
+      setTimeout(() => {
+        setCollecting(false);
+        setPhase(null);
+      }, 3000);
     };
     const onSensor = (data) => setSensorStatus(data);
     const onPaused = (data) => setPaused(data.paused);
@@ -222,7 +226,9 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
                 </div>
               )}
 
-              <div className="training-countdown">{countdown}</div>
+              {countdown > 0 && (
+                <div className="training-countdown">{countdown}</div>
+              )}
 
               {!isGesture && phase?.nextGesture && (
                 <div className="training-next">
