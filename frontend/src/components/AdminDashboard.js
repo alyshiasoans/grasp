@@ -16,6 +16,8 @@ function AdminDashboard({ user }) {
   const [gestureUnlocks, setGestureUnlocks] = useState([]);
   const [expandedModelId, setExpandedModelId] = useState(null);
   const [selectedModelIds, setSelectedModelIds] = useState([]);
+  const [filePage, setFilePage] = useState(0);
+  const FILES_PER_PAGE = 10;
 
   // Load all users on mount
   useEffect(() => {
@@ -27,7 +29,7 @@ function AdminDashboard({ user }) {
 
   // Load selected user's progress + training files + models
   useEffect(() => {
-    if (!selectedUserId) { setProgress(null); setTrainingFiles([]); setModels([]); setSelectedFileIds([]); setTrainLogs([]); setGestureUnlocks([]); return; }
+    if (!selectedUserId) { setProgress(null); setTrainingFiles([]); setModels([]); setSelectedFileIds([]); setTrainLogs([]); setGestureUnlocks([]); setFilePage(0); return; }
     setLoading(true);
     Promise.all([
       fetch(`${API}/api/dashboard/${selectedUserId}`).then((r) => r.json()),
@@ -267,7 +269,7 @@ function AdminDashboard({ user }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {trainingFiles.map((f) => {
+                    {trainingFiles.slice(filePage * FILES_PER_PAGE, (filePage + 1) * FILES_PER_PAGE).map((f) => {
                       const isMat = f.fileName.endsWith('.mat') || f.fileName.endsWith('.npz');
                       return (
                         <tr
@@ -295,6 +297,29 @@ function AdminDashboard({ user }) {
                     })}
                   </tbody>
                 </table>
+                {trainingFiles.length > FILES_PER_PAGE && (
+                  <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', fontSize: '0.85rem' }}>
+                    <button
+                      className="admin-set-active-btn"
+                      style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                      disabled={filePage === 0}
+                      onClick={() => setFilePage((p) => p - 1)}
+                    >
+                      ← Prev
+                    </button>
+                    <span style={{ color: '#666' }}>
+                      {filePage + 1} / {Math.ceil(trainingFiles.length / FILES_PER_PAGE)}
+                    </span>
+                    <button
+                      className="admin-set-active-btn"
+                      style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                      disabled={(filePage + 1) * FILES_PER_PAGE >= trainingFiles.length}
+                      onClick={() => setFilePage((p) => p + 1)}
+                    >
+                      Next →
+                    </button>
+                  </div>
+                )}
                 <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <button
                     className="admin-set-active-btn"
