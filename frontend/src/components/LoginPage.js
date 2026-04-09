@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-
-const API = 'http://localhost:5050';
+import { API } from '../constants';
 
 function LoginPage({ onLogin }) {
   const [isRegister, setIsRegister] = useState(false);

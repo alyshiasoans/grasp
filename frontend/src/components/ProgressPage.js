@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-
-const API = 'http://localhost:5050';
+import { API } from '../constants';
 
 function GestureCard({ g }) {
   const [expanded, setExpanded] = useState(false);

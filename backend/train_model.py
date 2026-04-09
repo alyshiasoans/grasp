@@ -16,15 +16,33 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 import joblib
 from datetime import datetime, timezone
+from collections import defaultdict
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+from config import BASE_DIR, GESTURE_CLASSES
 
-# ── Gesture class mapping ────────────────────────────────────────────────────
-# The LDA model uses integer labels; these are the canonical class indices.
-GESTURE_CLASSES = {
-    "Open": 0, "Close": 1, "Thumbs Up": 2, "Peace": 3,
-    "Index Point": 4, "Four": 5, "Okay": 6, "Spiderman": 7,
-}
+# ── Gesture class mapping (name → int) for label encoding ────────────────────
+GESTURE_NAME_TO_INT = {name: idx for idx, name in GESTURE_CLASSES.items()}
+
+
+def hudgins_features(window, threshold=0.01):
+    """Extract Hudgins features (MAV, WL, ZC, SSC) from a channels × samples window."""
+    ch, N = window.shape
+    MAV = np.mean(np.abs(window), axis=1)
+    WL = np.sum(np.abs(np.diff(window, axis=1)), axis=1)
+    ZC = np.zeros(ch)
+    SSC = np.zeros(ch)
+    for i in range(ch):
+        x = window[i]
+        ZC[i] = np.sum(
+            ((x[:-1] * x[1:]) < 0) & (np.abs(x[:-1] - x[1:]) >= threshold)
+        )
+        s1 = np.diff(x)
+        SSC[i] = np.sum(
+            ((s1[:-1] * s1[1:]) < 0)
+            & (np.abs(s1[:-1]) >= threshold)
+            & (np.abs(s1[1:]) >= threshold)
+        )
+    return np.concatenate([MAV, WL, ZC, SSC], axis=0)
 
 
 def _process_signal(Data, Fs, gesture_order):
@@ -155,9 +173,7 @@ def _process_signal(Data, Fs, gesture_order):
         (s, e) for s, e in detected_intervals_samples if (e - s) / Fs >= min_gesture_time_s
     ]
 
-    labels = np.array([GESTURE_CLASSES[g] for g in gesture_order])
-
-    from collections import defaultdict
+    labels = np.array([GESTURE_NAME_TO_INT[g] for g in gesture_order])
 
     counter = defaultdict(int)
     repetitions = []
@@ -192,25 +208,6 @@ def _process_signal(Data, Fs, gesture_order):
     X_windows = np.array(X_windows)
     y_windows = np.array(y_windows)
     gesture_interval_ids = np.array(gesture_interval_ids)
-
-    def hudgins_features(window, threshold=0.01):
-        ch, N = window.shape
-        MAV = np.mean(np.abs(window), axis=1)
-        WL = np.sum(np.abs(np.diff(window, axis=1)), axis=1)
-        ZC = np.zeros(ch)
-        SSC = np.zeros(ch)
-        for i in range(ch):
-            x = window[i]
-            ZC[i] = np.sum(
-                ((x[:-1] * x[1:]) < 0) & (np.abs(x[:-1] - x[1:]) >= threshold)
-            )
-            s1 = np.diff(x)
-            SSC[i] = np.sum(
-                ((s1[:-1] * s1[1:]) < 0)
-                & (np.abs(s1[:-1]) >= threshold)
-                & (np.abs(s1[1:]) >= threshold)
-            )
-        return np.concatenate([MAV, WL, ZC, SSC], axis=0)
 
     X_feat = np.array([hudgins_features(w) for w in X_windows])
     return X_feat, y_windows, gesture_interval_ids
@@ -251,18 +248,18 @@ def _process_with_intervals(Data, Fs, gesture_order, intervals):
     n_ch = Data.shape[1]
 
     # Filter
+    f_lower, f_upper, f_notch, bw_notch = 20, 450, 60, 2
     nyq = Fs / 2
-    b_bp, a_bp = butter(BUTTER_ORDER, [f_lower / nyq, f_upper / nyq], btype='band')
+    b_bp, a_bp = butter(2, [f_lower / nyq, f_upper / nyq], btype='band')
     b_n, a_n = iirnotch(f_notch / nyq, f_notch / bw_notch)
     sig_filt = np.zeros_like(Data.T)
     for ch in range(n_ch):
-        y = lfilter(b_bp, a_bp, Data[:, ch])
-        y = lfilter(b_n, a_n, y)
+        y = filtfilt(b_bp, a_bp, Data[:, ch])
+        y = filtfilt(b_n, a_n, y)
         sig_filt[ch] = y
 
-    labels = np.array([GESTURE_CLASSES[g] for g in gesture_order])
+    labels = np.array([GESTURE_NAME_TO_INT[g] for g in gesture_order])
 
-    from collections import defaultdict
     counter = defaultdict(int)
     repetitions = []
     for g in gesture_order:
@@ -293,25 +290,6 @@ def _process_with_intervals(Data, Fs, gesture_order, intervals):
     X_windows = np.array(X_windows)
     y_windows = np.array(y_windows)
     gesture_interval_ids = np.array(gesture_interval_ids)
-
-    def hudgins_features(window, threshold=0.01):
-        ch, N = window.shape
-        MAV = np.mean(np.abs(window), axis=1)
-        WL = np.sum(np.abs(np.diff(window, axis=1)), axis=1)
-        ZC = np.zeros(ch)
-        SSC = np.zeros(ch)
-        for i in range(ch):
-            x = window[i]
-            ZC[i] = np.sum(
-                ((x[:-1] * x[1:]) < 0) & (np.abs(x[:-1] - x[1:]) >= threshold)
-            )
-            s1 = np.diff(x)
-            SSC[i] = np.sum(
-                ((s1[:-1] * s1[1:]) < 0)
-                & (np.abs(s1[:-1]) >= threshold)
-                & (np.abs(s1[1:]) >= threshold)
-            )
-        return np.concatenate([MAV, WL, ZC, SSC], axis=0)
 
     X_feat = np.array([hudgins_features(w) for w in X_windows])
     return X_feat, y_windows, gesture_interval_ids

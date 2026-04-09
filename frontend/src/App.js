@@ -9,7 +9,7 @@ import LoginPage from './components/LoginPage';
 import ProgressPage from './components/ProgressPage';
 import LivePredictionPage from './components/LivePredictionPage';
 
-const BACKEND_URL = 'http://localhost:5050';
+import { API as BACKEND_URL } from './constants';
 
 function App() {
   const [user, setUser] = useState(null);

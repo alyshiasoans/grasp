@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { GESTURE_IMAGES_JPG } from '../constants';
 
 const STATE_COLORS = {
   REST: '#999',
@@ -8,16 +9,7 @@ const STATE_COLORS = {
   STOPPED: '#c44',
 };
 
-const GESTURE_IMAGES = {
-  'Open': '/gestures/open.jpg',
-  'Close': '/gestures/close.jpg',
-  'Thumbs Up': '/gestures/thumbs_up.jpg',
-  'Peace': '/gestures/peace.jpg',
-  'Index Point': '/gestures/index_point.jpg',
-  'Four': '/gestures/four.jpg',
-  'Okay': '/gestures/okay.jpg',
-  'Spiderman': '/gestures/spiderman.jpg',
-};
+const GESTURE_IMAGES = GESTURE_IMAGES_JPG;
 
 function GestureDisplay({ label, gesture, color, activation }) {
   const labelColor = STATE_COLORS[label] || '#888888';
