@@ -20,6 +20,11 @@ class User(db.Model):
     is_admin = db.Column(db.Boolean, default=False, nullable=False)
     training_streak = db.Column(db.Integer, default=0, nullable=False)
 
+    # per-user signal thresholds (persisted between sessions)
+    pref_t_on = db.Column(db.Float)
+    pref_t_off = db.Column(db.Float)
+    pref_min_votes = db.Column(db.Integer)
+
     # relationships
     user_gestures = db.relationship("UserGesture", back_populates="user", cascade="all, delete-orphan")
     sessions = db.relationship("Session", back_populates="user", cascade="all, delete-orphan")
@@ -78,6 +83,8 @@ class Session(db.Model):
     started_at = db.Column(db.DateTime)
     ended_at = db.Column(db.DateTime)
     number_of_connected_channels = db.Column(db.Integer)
+    session_name = db.Column(db.Text)
+    mode = db.Column(db.Text)
 
     user = db.relationship("User", back_populates="sessions")
     training_gestures = db.relationship("TrainingGesture", back_populates="session", cascade="all, delete-orphan")
