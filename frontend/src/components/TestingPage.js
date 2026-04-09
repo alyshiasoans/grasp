@@ -15,33 +15,21 @@
  */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import {
+  API, CHANNEL_COUNT, GOOD_THRESHOLD, FAIR_THRESHOLD,
+  T_ON_DEFAULT, T_OFF_DEFAULT, GESTURE_COLORS, GESTURE_IMAGES_PNG,
+  SUCCESS_GREEN,
+} from '../constants';
+import SensorStatusBar from './SensorStatusBar';
+import EMGStrip from './EMGStrip';
 
 // ─────────────────────────────────────────────────────────────────────────────
-const API            = 'http://localhost:5050';
 const MAX_RETRIES    = 3;
-const CHANNEL_COUNT  = 64;
-const GOOD_THRESHOLD = 50;
-const FAIR_THRESHOLD = 30;
-const SUCCESS_GREEN  = '#35d06e';
 const GAME_VIEW_MAX  = 1120;
 
-// Relative threshold defaults — overridden live from backend signal events
-const T_ON_DEFAULT  = 2.4;
-const T_OFF_DEFAULT = 1.8;
-
-const GESTURE_COLORS = {
-  'Open':'#00e5ff',  'Close':'#ff4081',   'Thumbs Up':'#69ff47',
-  'Peace':'#ffd740', 'Index Point':'#e040fb', 'Four':'#ff6d00',
-  'Okay':'#00e676',  'Spiderman':'#ff1744',
-};
 const ALL_GESTURES = Object.keys(GESTURE_COLORS);
 
-const GESTURE_IMAGES = {
-  'Open':'/gestures/open.png',            'Close':'/gestures/close.png',
-  'Thumbs Up':'/gestures/thumbs_up.png',  'Peace':'/gestures/peace.png',
-  'Index Point':'/gestures/index_point.png', 'Four':'/gestures/four.png',
-  'Okay':'/gestures/okay.png',            'Spiderman':'/gestures/spiderman.png',
-};
+const GESTURE_IMAGES = GESTURE_IMAGES_PNG;
 
 const SIM_GESTURE_ORDER = [
   'Okay','Open','Peace','Peace','Thumbs Up','Spiderman','Spiderman','Thumbs Up',
@@ -77,81 +65,6 @@ function missYForPipe(pipe) {
   const roomAbove = pipe.gapTop - (MARGIN + BR);
   const roomBelow = (GH - MARGIN - BR) - (pipe.gapTop + GAP_H);
   return roomBelow >= roomAbove ? belowY : aboveY;
-}
-
-// ── Sensor status ─────────────────────────────────────────────────────────────
-function SensorStatusBar({ channels }) {
-  const activeCount = useMemo(() => channels.filter(v => v > 0.15).length, [channels]);
-  const quality = activeCount >= GOOD_THRESHOLD ? 'good'
-    : activeCount >= FAIR_THRESHOLD ? 'fair' : 'poor';
-  const col   = { good:SUCCESS_GREEN, fair:'#ffd740', poor:'#ff4081' }[quality];
-  const label = { good:'Good',    fair:'Fair',    poor:'Poor'    }[quality];
-  return (
-    <div style={{ display:'flex', alignItems:'center', gap:6,
-      fontSize:'0.78rem', fontFamily:'monospace', color:'#666' }}>
-      <span>Sensor quality:</span>
-      <span style={{ color:col, fontWeight:700 }}>{label}</span>
-    </div>
-  );
-}
-
-// ── EMG activation strip ──────────────────────────────────────────────────────
-// actHistory: array of absolute RMS values
-// tOn / tOff: absolute RMS thresholds from backend
-function EMGStrip({ actHistory, tOn, tOff }) {
-  const ref = useRef(null);
-  const tOnVal  = tOn  || T_ON_DEFAULT;
-  const tOffVal = tOff || T_OFF_DEFAULT;
-
-  useEffect(() => {
-    const c = ref.current; if (!c) return;
-    const ctx = c.getContext('2d');
-    const W = c.width, H = c.height;
-    ctx.fillStyle = '#090910'; ctx.fillRect(0, 0, W, H);
-
-    // Scale: show 0 → T_ON * 2.5 so both threshold lines are comfortably visible
-    const maxAct = tOnVal * 2.5;
-    const yOn  = H - (tOnVal  / maxAct) * H;
-    const yOff = H - (tOffVal / maxAct) * H;
-
-    ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
-    ctx.strokeStyle = '#ff408133';
-    ctx.beginPath(); ctx.moveTo(0, yOn);  ctx.lineTo(W, yOn);  ctx.stroke();
-    ctx.strokeStyle = '#ffd74033';
-    ctx.beginPath(); ctx.moveTo(0, yOff); ctx.lineTo(W, yOff); ctx.stroke();
-    ctx.setLineDash([]);
-
-    ctx.font = '9px monospace';
-    ctx.fillStyle = '#ff408177';
-    ctx.fillText(`T_ON ${tOnVal}`,  5, yOn  - 2);
-    ctx.fillStyle = '#ffd74077';
-    ctx.fillText(`T_OFF ${tOffVal}`, 5, yOff - 2);
-
-    if (actHistory.length < 2) return;
-    ctx.beginPath(); ctx.lineWidth = 2;
-    actHistory.forEach((v, i) => {
-      const x = (i / (actHistory.length - 1)) * W;
-      const y = H - Math.min(1, v / maxAct) * H;
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    });
-    const gr = ctx.createLinearGradient(0, 0, W, 0);
-    gr.addColorStop(0, '#5c5cff44'); gr.addColorStop(1, '#00e5ff');
-    ctx.strokeStyle = gr; ctx.stroke();
-    ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
-    const fg = ctx.createLinearGradient(0, 0, 0, H);
-    fg.addColorStop(0, '#00e5ff14'); fg.addColorStop(1, '#00e5ff00');
-    ctx.fillStyle = fg; ctx.fill();
-  }, [actHistory, tOnVal, tOffVal]);
-
-  return (
-    <div>
-      <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace',
-        marginBottom:3, letterSpacing:1 }}>EMG ACTIVATION</div>
-      <canvas ref={ref} width={700} height={80}
-        style={{ width:'100%', height:80, borderRadius:6,
-          border:'1px solid #1a1a2e', display:'block' }} />
-    </div>
-  );
 }
 
 // ── Pipe draw helper ──────────────────────────────────────────────────────────
@@ -858,7 +771,7 @@ function FlappyBallGame({
     }
     if (lastDecisionTokenRef.current === decision.token) return;
     lastDecisionTokenRef.current = decision.token;
-    const pipe = G.current.pipes.find(p => !p.evaluated && !p.outcome);
+    const pipe = G.current.pipes.find(p => !p.evaluated);
     if (!pipe) return;
     pipe.outcome       = decision.isCorrect ? 'pass' : 'fail';
     pipe.predicted     = decision.predicted || null;
@@ -1171,7 +1084,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
   const handleClassification = useCallback((predicted, voteList) => {
     const gesture = curRef.current;
-    if (!gesture || pendingResultRef.current) return;
+    if (!gesture) return;
     // Only accept classifications while actively prompting
     if (phaseRef.current !== 'prompting') return;
     decisionSeqRef.current += 1;
@@ -1247,6 +1160,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
     let timer    = 0;
     let act      = 0;
     let fired    = false;
+    let refired  = false;
 
     const iv = setInterval(() => {
       if (!simRunning.current) return;
@@ -1258,6 +1172,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
         timer = 0;
         act = 0;
         fired = false;
+        refired = false;
       }
 
       timer++;
@@ -1289,6 +1204,23 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
       } else if (simPhase === 'hold') {
         act = Math.max(SIM_T_ON * 3.2, Math.min(SIM_T_ON * 3.9, act + noise() * 0.25));
+        // Re-classify mid-hold with higher accuracy (simulates EMG refinement)
+        if (!refired && timer >= Math.round(TICKS_HOLD * 0.4)) {
+          refired = true;
+          const idx       = simIdxRef.current;
+          const target    = SIM_GESTURE_ORDER[idx];
+          const correct   = Math.random() < 0.88;
+          const predicted = correct
+            ? target
+            : ALL_GESTURES[Math.floor(Math.random() * ALL_GESTURES.length)];
+          const fv = Array.from({ length:30 }, () =>
+            Math.random() < 0.82
+              ? predicted
+              : ALL_GESTURES[Math.floor(Math.random() * ALL_GESTURES.length)]
+          );
+          setVotes(fv);
+          classifyRef.current(predicted, fv);
+        }
         if (timer > TICKS_HOLD) { simPhase = 'falling'; timer = 0; }
 
       } else {
@@ -1831,7 +1763,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
         {/* EMG strip — passes live absolute thresholds */}
         <div style={{ marginTop:12, width:'100%', maxWidth:GAME_VIEW_MAX, marginInline:'auto' }}>
-          <EMGStrip actHistory={actHistory} tOn={tOnLive} tOff={tOffLive} />
+          <EMGStrip actHistory={actHistory} />
         </div>
       </div>
 

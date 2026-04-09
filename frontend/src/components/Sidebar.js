@@ -6,6 +6,7 @@ const NAV_ITEMS = [
   { key: 'testing',  label: 'Practice',  icon: '▶' },
   { key: 'predict',  label: 'Predict',   icon: '🔮' },
   { key: 'progress', label: 'Progress',  icon: '📊' },
+  { key: 'settings', label: 'Settings',   icon: '⚙' },
 ];
 
 const ADMIN_NAV_ITEMS = [

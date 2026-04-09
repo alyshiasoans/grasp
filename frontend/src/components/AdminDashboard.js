@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-
-const API = 'http://localhost:5050';
+import { API } from '../constants';
 
 function AdminDashboard({ user }) {
   const [users, setUsers] = useState([]);
@@ -17,6 +16,8 @@ function AdminDashboard({ user }) {
   const [gestureUnlocks, setGestureUnlocks] = useState([]);
   const [expandedModelId, setExpandedModelId] = useState(null);
   const [selectedModelIds, setSelectedModelIds] = useState([]);
+  const [filePage, setFilePage] = useState(0);
+  const FILES_PER_PAGE = 10;
 
   // Load all users on mount
   useEffect(() => {
@@ -28,7 +29,7 @@ function AdminDashboard({ user }) {
 
   // Load selected user's progress + training files + models
   useEffect(() => {
-    if (!selectedUserId) { setProgress(null); setTrainingFiles([]); setModels([]); setSelectedFileIds([]); setTrainLogs([]); setGestureUnlocks([]); return; }
+    if (!selectedUserId) { setProgress(null); setTrainingFiles([]); setModels([]); setSelectedFileIds([]); setTrainLogs([]); setGestureUnlocks([]); setFilePage(0); return; }
     setLoading(true);
     Promise.all([
       fetch(`${API}/api/dashboard/${selectedUserId}`).then((r) => r.json()),
@@ -268,7 +269,7 @@ function AdminDashboard({ user }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {trainingFiles.map((f) => {
+                    {trainingFiles.slice(filePage * FILES_PER_PAGE, (filePage + 1) * FILES_PER_PAGE).map((f) => {
                       const isMat = f.fileName.endsWith('.mat') || f.fileName.endsWith('.npz');
                       return (
                         <tr
@@ -296,6 +297,29 @@ function AdminDashboard({ user }) {
                     })}
                   </tbody>
                 </table>
+                {trainingFiles.length > FILES_PER_PAGE && (
+                  <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', fontSize: '0.85rem' }}>
+                    <button
+                      className="admin-set-active-btn"
+                      style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                      disabled={filePage === 0}
+                      onClick={() => setFilePage((p) => p - 1)}
+                    >
+                      ← Prev
+                    </button>
+                    <span style={{ color: '#666' }}>
+                      {filePage + 1} / {Math.ceil(trainingFiles.length / FILES_PER_PAGE)}
+                    </span>
+                    <button
+                      className="admin-set-active-btn"
+                      style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                      disabled={(filePage + 1) * FILES_PER_PAGE >= trainingFiles.length}
+                      onClick={() => setFilePage((p) => p + 1)}
+                    >
+                      Next →
+                    </button>
+                  </div>
+                )}
                 <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
                   <button
                     className="admin-set-active-btn"
@@ -318,7 +342,7 @@ function AdminDashboard({ user }) {
 
           {/* Available models */}
           <div className="card admin-table-card">
-            <h3 className="admin-table-title">Available Models</h3>
+            <h3 className="admin-table-title">Models</h3>
             {models.length === 0 ? (
               <p style={{ color: '#999', fontSize: '0.9rem' }}>No models found.</p>
             ) : (
@@ -328,8 +352,7 @@ function AdminDashboard({ user }) {
                     <th></th>
                     <th>Version</th>
                     <th>Accuracy</th>
-                    <th>File</th>
-                    <th>Trained</th>
+                    <th>Date</th>
                     <th>Time</th>
                     <th style={{ textAlign: 'center' }}>Status</th>
                   </tr>
@@ -351,13 +374,9 @@ function AdminDashboard({ user }) {
                           />
                         </td>
                         <td>
-                          <span style={{ marginRight: 6, fontSize: '0.7rem', color: '#666' }}>
-                            {expandedModelId === m.id ? '▾' : '▸'}
-                          </span>
                           {m.name || `v${m.versionNumber}`}
                         </td>
                         <td>{m.accuracy != null ? `${m.accuracy}%` : '—'}</td>
-                        <td>{m.filePath ? m.filePath.replace(/^models[\\/]/, '') : '—'}</td>
                         <td>{m.trainingDate ? new Date(m.trainingDate + 'Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
                         <td>{m.trainingDate ? new Date(m.trainingDate + 'Z').toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '—'}</td>
                         <td style={{ textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
@@ -375,7 +394,7 @@ function AdminDashboard({ user }) {
                       </tr>
                       {expandedModelId === m.id && (
                         <tr>
-                          <td colSpan={7} style={{ padding: '10px 20px 14px', background: 'transparent', borderTop: 'none' }}>
+                          <td colSpan={6} style={{ padding: '10px 20px 14px', background: 'transparent', borderTop: 'none' }}>
                             <div style={{ fontSize: '0.72rem', color: '#666', fontFamily: 'monospace', letterSpacing: 0.5, marginBottom: 6 }}>
                               TRAINED ON ({m.trainingFiles?.length || 0} files)
                             </div>

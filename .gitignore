@@ -5,6 +5,9 @@ __pycache__/
 # Node
 node_modules/
 
+# Build output
+frontend/build/
+
 # Data / large files
 *.mat
 *.pkl

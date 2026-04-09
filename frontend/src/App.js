@@ -156,6 +156,15 @@ function App() {
                 activePage={activePage}
               />
             </div>
+
+            <div style={{ display: activePage === 'settings' ? 'block' : 'none' }}>
+              <SettingsPage
+                user={user}
+                setUser={setUser}
+                connected={connected}
+                activePage={activePage}
+              />
+            </div>
           </>
         )}
       </div>
