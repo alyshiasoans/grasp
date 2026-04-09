@@ -99,54 +99,37 @@ def register_socket_handlers(socketio, app):
         _emit_config_state()
 
     def _emit_config_state():
+        mp = state.runtime_config["model_path"]
+        rel = os.path.relpath(mp, BASE_DIR) if mp else None
         socketio.emit("config_state", {
             "t_on":       state.runtime_config["t_on"],
             "t_off":      state.runtime_config["t_off"],
             "min_votes":  state.runtime_config["min_votes"],
-            "model_path": os.path.basename(state.runtime_config["model_path"]) if state.runtime_config["model_path"] else None,
+            "model_path": rel,
         })
 
     # ── Device check / battery ────────────────────────────────────────────
 
     @socketio.on("check_device")
     def on_check_device(data=None):
-        data = data or {}
-        host = data.get("host", "0.0.0.0")
-        port = int(data.get("port", 45454))
-        timeout = 6
-
+        """Check device reachability via its web UI instead of opening
+        a TCP listener on the streaming port (which would consume the
+        device's connection attempt and leave the real start() with
+        nothing to accept)."""
         def _probe():
-            srv = None
-            cli = None
             try:
-                srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                srv.bind((host, port))
-                srv.listen(1)
-                srv.settimeout(timeout)
                 socketio.emit("device_status", {"status": "connecting"})
-                cli, addr = srv.accept()
-                cli.close()
-                srv.close()
-                socketio.emit("device_status", {"status": "connected"})
-            except socket.timeout:
-                socketio.emit("device_status", {
-                    "status": "error",
-                    "error": "Device not found. Check WiFi connection and try again.",
-                })
-            except OSError as e:
+                level = _scrape_battery()
+                if level is not None:
+                    socketio.emit("device_status", {"status": "connected"})
+                    socketio.emit("battery_level", {"level": level})
+                else:
+                    socketio.emit("device_status", {
+                        "status": "error",
+                        "error": "Device not found. Check WiFi connection and try again.",
+                    })
+            except Exception as e:
                 socketio.emit("device_status", {"status": "error", "error": str(e)})
-            finally:
-                if cli:
-                    try:
-                        cli.close()
-                    except Exception:
-                        pass
-                if srv:
-                    try:
-                        srv.close()
-                    except Exception:
-                        pass
 
         threading.Thread(target=_probe, daemon=True).start()
 

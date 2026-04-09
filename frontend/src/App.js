@@ -8,6 +8,7 @@ import AdminDashboard from './components/AdminDashboard';
 import LoginPage from './components/LoginPage';
 import ProgressPage from './components/ProgressPage';
 import LivePredictionPage from './components/LivePredictionPage';
+import SettingsPage from './components/SettingsPage';
 
 import { API as BACKEND_URL } from './constants';
 
@@ -99,7 +100,7 @@ function App() {
           <h1 className="title">
             {user?.isAdmin
               ? 'Admin Dashboard'
-              : activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Practice' : activePage === 'predict' ? 'Live Prediction' : activePage === 'progress' ? 'Progress' : 'Dashboard'}
+              : activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Practice' : activePage === 'predict' ? 'Live Prediction' : activePage === 'progress' ? 'Progress' : activePage === 'settings' ? 'Settings' : 'Dashboard'}
           </h1>
           {!user?.isAdmin && (
             <div className="header-right">
@@ -140,11 +141,20 @@ function App() {
             </div>
 
             <div style={{ display: activePage === 'predict' ? 'block' : 'none' }}>
-              <LivePredictionPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
+              <LivePredictionPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} activePage={activePage} />
             </div>
 
             <div style={{ display: activePage === 'progress' ? 'block' : 'none' }}>
               <ProgressPage user={user} />
+            </div>
+
+            <div style={{ display: activePage === 'settings' ? 'block' : 'none' }}>
+              <SettingsPage
+                user={user}
+                setUser={setUser}
+                connected={connected}
+                activePage={activePage}
+              />
             </div>
           </>
         )}

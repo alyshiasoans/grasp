@@ -39,8 +39,8 @@ F_LOWER, F_UPPER = 20, 450
 F_NOTCH, BW_NOTCH = 60, 2
 
 # ── Detection thresholds (relative to rest baseline) ─────────────────────────
-T_ON   = 2.0
-T_OFF  = 1.3
+T_ON   = 40
+T_OFF  = 25
 REST_CALIB_S = 2.0
 
 N_ON            = 1
@@ -49,7 +49,7 @@ DET_WIN_MS      = 200
 DET_STEP_MS     = 100
 WIN_MS          = 200
 MAX_GESTURE_S   = 3.5
-MIN_VOTES       = 3
+MIN_VOTES       = 12
 
 # ── Training collector timing ────────────────────────────────────────────────
 GESTURE_S        = 3.0

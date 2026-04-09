@@ -9,8 +9,8 @@ export const GOOD_THRESHOLD = 50;
 export const FAIR_THRESHOLD = 30;
 export const SUCCESS_GREEN = '#35d06e';
 
-export const T_ON_DEFAULT = 2.4;
-export const T_OFF_DEFAULT = 1.8;
+export const T_ON_DEFAULT = 40;
+export const T_OFF_DEFAULT = 25;
 
 export const GESTURE_COLORS = {
   'Open': '#00e5ff', 'Close': '#ff4081', 'Thumbs Up': '#69ff47',

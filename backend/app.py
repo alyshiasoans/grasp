@@ -12,7 +12,7 @@ from flask_cors import CORS
 
 from config import BASE_DIR, DB_PATH
 from models import db, Gesture, UserGesture
-from routes import api
+from routes import api, set_socketio
 from socket_handlers import register_socket_handlers
 
 
@@ -29,6 +29,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # Register routes and socket handlers
 app.register_blueprint(api)
+set_socketio(socketio)
 register_socket_handlers(socketio, app)
 
 
@@ -47,6 +48,13 @@ def ensure_sqlite_schema():
             cursor.execute("ALTER TABLE model_versions ADD COLUMN training_file_ids TEXT")
         if mv_columns and "name" not in mv_columns:
             cursor.execute("ALTER TABLE model_versions ADD COLUMN name VARCHAR(100)")
+        # per-user threshold preferences
+        if "pref_t_on" not in user_columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN pref_t_on FLOAT")
+        if "pref_t_off" not in user_columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN pref_t_off FLOAT")
+        if "pref_min_votes" not in user_columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN pref_min_votes INTEGER")
         conn.commit()
 
 

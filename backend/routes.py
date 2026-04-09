@@ -13,9 +13,18 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from config import (
     BASE_DIR, MODELS_DIR, GESTURE_CLASSES,
     UNLOCK_ORDER, AUTO_UNLOCK_ACCURACY, AUTO_UNLOCK_MIN_TESTS,
+    T_ON, T_OFF, MIN_VOTES, GESTURE_S, REST_S, REPS_PER_GESTURE,
+    TRAINING_DIR,
 )
 import state
 from models import db, User, Gesture, UserGesture, Session, TestingTrial, TrainingGesture, TrainingFile, ModelVersion
+
+# Will be set by app.py after socketio is created
+_socketio = None
+
+def set_socketio(sio):
+    global _socketio
+    _socketio = sio
 
 api = Blueprint("api", __name__)
 
@@ -103,6 +112,13 @@ def login():
     if not user or not check_password_hash(user.password_hash, password):
         return jsonify({"error": "Invalid username or password"}), 401
     user.last_login = datetime.now(timezone.utc)
+    # restore saved thresholds into runtime config
+    if user.pref_t_on is not None:
+        state.runtime_config["t_on"] = user.pref_t_on
+    if user.pref_t_off is not None:
+        state.runtime_config["t_off"] = user.pref_t_off
+    if user.pref_min_votes is not None:
+        state.runtime_config["min_votes"] = user.pref_min_votes
     db.session.commit()
     return jsonify({
         "id": user.id, "username": user.username,
@@ -503,3 +519,149 @@ def admin_train_model():
         "accuracy": result["accuracy"], "filePath": result["model_path"],
         "nSamples": result["n_samples"], "logs": logs,
     })
+
+
+# ── Settings: runtime config ────────────────────────────────────────────────
+
+@api.route("/api/settings/config/<int:user_id>", methods=["GET"])
+def get_config(user_id):
+    user = db.session.get(User, user_id)
+    return jsonify({
+        "tOn": state.runtime_config["t_on"],
+        "tOff": state.runtime_config["t_off"],
+        "minVotes": state.runtime_config["min_votes"],
+        "gestureS": GESTURE_S,
+        "restS": REST_S,
+        "repsPerGesture": REPS_PER_GESTURE,
+    })
+
+
+@api.route("/api/settings/config/<int:user_id>", methods=["POST"])
+def update_config(user_id):
+    data = request.get_json(silent=True) or {}
+    user = db.session.get(User, user_id)
+    if "tOn" in data:
+        val = float(data["tOn"])
+        state.runtime_config["t_on"] = val
+        if user:
+            user.pref_t_on = val
+    if "tOff" in data:
+        val = float(data["tOff"])
+        state.runtime_config["t_off"] = val
+        if user:
+            user.pref_t_off = val
+    if "minVotes" in data:
+        val = int(data["minVotes"])
+        state.runtime_config["min_votes"] = val
+        if user:
+            user.pref_min_votes = val
+    if user:
+        db.session.commit()
+    # broadcast updated config to all connected clients (e.g. Predict page)
+    if _socketio:
+        _socketio.emit("config_state", {
+            "t_on": state.runtime_config["t_on"],
+            "t_off": state.runtime_config["t_off"],
+            "min_votes": state.runtime_config["min_votes"],
+            "model_path": os.path.basename(state.runtime_config["model_path"]) if state.runtime_config["model_path"] else None,
+        })
+    return jsonify({"ok": True})
+
+@api.route("/api/settings/profile/<int:user_id>", methods=["GET"])
+def get_profile(user_id):
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({
+        "id": user.id, "firstName": user.first_name,
+        "lastName": user.last_name, "username": user.username,
+    })
+
+
+@api.route("/api/settings/profile/<int:user_id>", methods=["POST"])
+def update_profile(user_id):
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    data = request.get_json(silent=True) or {}
+    first = (data.get("firstName") or "").strip()
+    last = (data.get("lastName") or "").strip()
+    if first:
+        user.first_name = first
+    if last:
+        user.last_name = last
+    db.session.commit()
+    return jsonify({
+        "ok": True, "firstName": user.first_name, "lastName": user.last_name,
+    })
+
+
+@api.route("/api/settings/password/<int:user_id>", methods=["POST"])
+def change_password(user_id):
+    user = db.session.get(User, user_id)
+    if not user:
+        return jsonify({"error": "User not found"}), 404
+    data = request.get_json(silent=True) or {}
+    current = data.get("currentPassword") or ""
+    new_pw  = data.get("newPassword") or ""
+    if not current or not new_pw:
+        return jsonify({"error": "Both current and new password required"}), 400
+    if not check_password_hash(user.password_hash, current):
+        return jsonify({"error": "Current password is incorrect"}), 403
+    if len(new_pw) < 1:
+        return jsonify({"error": "Password too short"}), 400
+    user.password_hash = generate_password_hash(new_pw)
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
+# ── Settings: data management ───────────────────────────────────────────────
+
+@api.route("/api/settings/files/<int:user_id>", methods=["GET"])
+def user_training_files(user_id):
+    files = TrainingFile.query.filter_by(user_id=user_id).order_by(TrainingFile.id.desc()).all()
+    return jsonify([{
+        "id": f.id, "fileName": f.file_name, "filePath": f.file_path,
+        "createdAt": f.created_at.isoformat() if f.created_at else None,
+    } for f in files])
+
+
+@api.route("/api/settings/files/<int:file_id>", methods=["DELETE"])
+def delete_training_file(file_id):
+    f = db.session.get(TrainingFile, file_id)
+    if not f:
+        return jsonify({"error": "File not found"}), 404
+    # delete the file from disk
+    full_path = os.path.join(BASE_DIR, f.file_path) if not os.path.isabs(f.file_path) else f.file_path
+    if os.path.exists(full_path):
+        os.remove(full_path)
+    db.session.delete(f)
+    db.session.commit()
+    return jsonify({"ok": True})
+
+
+# ── Settings: user models ───────────────────────────────────────────────────
+
+@api.route("/api/settings/models/<int:user_id>", methods=["GET"])
+def user_models(user_id):
+    models = ModelVersion.query.filter_by(user_id=user_id).order_by(ModelVersion.version_number.desc()).all()
+    return jsonify([{
+        "id": m.id, "versionNumber": m.version_number,
+        "name": m.name, "accuracy": round(m.accuracy, 1) if m.accuracy else None,
+        "isActive": m.is_active,
+        "trainingDate": m.training_date.isoformat() if m.training_date else None,
+    } for m in models])
+
+
+@api.route("/api/settings/models/<int:user_id>/set-active", methods=["POST"])
+def user_set_active_model(user_id):
+    data = request.get_json(silent=True) or {}
+    model_id = data.get("modelId")
+    if not model_id:
+        return jsonify({"error": "modelId required"}), 400
+    ModelVersion.query.filter_by(user_id=user_id, is_active=True).update({"is_active": False})
+    mv = db.session.get(ModelVersion, model_id)
+    if mv and mv.user_id == user_id:
+        mv.is_active = True
+    db.session.commit()
+    return jsonify({"ok": True})

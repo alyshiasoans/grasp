@@ -142,6 +142,9 @@ def run_worker(app, socketio, mode="simulated", live_opts=None, user_id=None):
     rest_mean    = np.ones(n_ch)
     calib_done   = True
 
+    # Track current model path so we can hot-reload on change
+    current_model_path = model_path
+
     # ── Detection state ───────────────────────────────────────────────────
     det_buf     = deque(maxlen=det_win)
     raw_buf     = deque(maxlen=det_win)
@@ -228,6 +231,18 @@ def run_worker(app, socketio, mode="simulated", live_opts=None, user_id=None):
         # Re-read thresholds each step so live changes apply
         t_on  = state.runtime_config["t_on"]
         t_off = state.runtime_config["t_off"]
+
+        # Hot-reload model if runtime config changed
+        new_mp = state.runtime_config.get("model_path")
+        if new_mp and new_mp != current_model_path and os.path.isfile(new_mp):
+            try:
+                scaler, model = joblib.load(new_mp)
+                current_model_path = new_mp
+                print(f"[worker] hot-reloaded model: {new_mp}")
+                socketio.emit("log", {"text": f"✓  model switched → {os.path.basename(new_mp)}"})
+            except Exception as e:
+                print(f"[worker] model hot-reload failed: {e}")
+                socketio.emit("log", {"text": f"⚠ model reload failed: {e}"})
 
         if state_ == 0:
             if act_filt > t_on:

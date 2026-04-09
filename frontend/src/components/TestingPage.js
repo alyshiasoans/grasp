@@ -771,7 +771,7 @@ function FlappyBallGame({
     }
     if (lastDecisionTokenRef.current === decision.token) return;
     lastDecisionTokenRef.current = decision.token;
-    const pipe = G.current.pipes.find(p => !p.evaluated && !p.outcome);
+    const pipe = G.current.pipes.find(p => !p.evaluated);
     if (!pipe) return;
     pipe.outcome       = decision.isCorrect ? 'pass' : 'fail';
     pipe.predicted     = decision.predicted || null;
@@ -1084,7 +1084,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
   const handleClassification = useCallback((predicted, voteList) => {
     const gesture = curRef.current;
-    if (!gesture || pendingResultRef.current) return;
+    if (!gesture) return;
     // Only accept classifications while actively prompting
     if (phaseRef.current !== 'prompting') return;
     decisionSeqRef.current += 1;
@@ -1160,6 +1160,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
     let timer    = 0;
     let act      = 0;
     let fired    = false;
+    let refired  = false;
 
     const iv = setInterval(() => {
       if (!simRunning.current) return;
@@ -1171,6 +1172,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
         timer = 0;
         act = 0;
         fired = false;
+        refired = false;
       }
 
       timer++;
@@ -1202,6 +1204,23 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, mod
 
       } else if (simPhase === 'hold') {
         act = Math.max(SIM_T_ON * 3.2, Math.min(SIM_T_ON * 3.9, act + noise() * 0.25));
+        // Re-classify mid-hold with higher accuracy (simulates EMG refinement)
+        if (!refired && timer >= Math.round(TICKS_HOLD * 0.4)) {
+          refired = true;
+          const idx       = simIdxRef.current;
+          const target    = SIM_GESTURE_ORDER[idx];
+          const correct   = Math.random() < 0.88;
+          const predicted = correct
+            ? target
+            : ALL_GESTURES[Math.floor(Math.random() * ALL_GESTURES.length)];
+          const fv = Array.from({ length:30 }, () =>
+            Math.random() < 0.82
+              ? predicted
+              : ALL_GESTURES[Math.floor(Math.random() * ALL_GESTURES.length)]
+          );
+          setVotes(fv);
+          classifyRef.current(predicted, fv);
+        }
         if (timer > TICKS_HOLD) { simPhase = 'falling'; timer = 0; }
 
       } else {

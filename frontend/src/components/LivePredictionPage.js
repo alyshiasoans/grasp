@@ -8,13 +8,13 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   API, CHANNEL_COUNT, GOOD_THRESHOLD, FAIR_THRESHOLD,
-  T_ON_DEFAULT, T_OFF_DEFAULT, GESTURE_COLORS, GESTURE_IMAGES_JPG,
+  T_ON_DEFAULT, T_OFF_DEFAULT, GESTURE_COLORS, GESTURE_IMAGES_PNG,
   SUCCESS_GREEN,
 } from '../constants';
 import SensorStatusBar from './SensorStatusBar';
 import EMGStrip from './EMGStrip';
 
-const GESTURE_IMAGES = GESTURE_IMAGES_JPG;
+const GESTURE_IMAGES = GESTURE_IMAGES_PNG;
 
 // ── History log entry ─────────────────────────────────────────────────────────
 function HistoryEntry({ gesture, timestamp }) {
@@ -31,7 +31,7 @@ function HistoryEntry({ gesture, timestamp }) {
 // ═════════════════════════════════════════════════════════════════════════════
 // ── Main component ──────────────────────────────────────────────────────────
 // ═════════════════════════════════════════════════════════════════════════════
-function LivePredictionPage({ socket, connected, user, mode, liveOpts }) {
+function LivePredictionPage({ socket, connected, user, mode, liveOpts, activePage }) {
   const [running, setRunning] = useState(false);
   const [stateLabel, setStateLabel] = useState('REST');
   const [gesture, setGesture] = useState('');
@@ -49,33 +49,30 @@ function LivePredictionPage({ socket, connected, user, mode, liveOpts }) {
   const [cfgMinVotes, setCfgMinVotes] = useState('');
   const [cfgModel, setCfgModel] = useState('');
   const [modelList, setModelList] = useState([]);
-  const [configLoaded, setConfigLoaded] = useState(false);
 
   // ── Fetch model list + current config on mount ──────────────────────────
   useEffect(() => {
+    if (activePage !== 'predict') return;
     const uid = user?.id;
     const url = uid ? `${API}/api/models/list?userId=${uid}` : `${API}/api/models/list`;
     fetch(url)
       .then(r => r.json())
       .then(models => setModelList(models || []))
       .catch(() => {});
-  }, [user?.id]);
+  }, [user?.id, activePage]);
 
   useEffect(() => {
     if (!socket) return;
     const onConfig = (data) => {
-      if (!configLoaded) {
-        setCfgTOn(String(data.t_on));
-        setCfgTOff(String(data.t_off));
-        setCfgMinVotes(String(data.min_votes));
-        setCfgModel(data.model_path || '');
-        setConfigLoaded(true);
-      }
+      setCfgTOn(String(data.t_on));
+      setCfgTOff(String(data.t_off));
+      setCfgMinVotes(String(data.min_votes));
+      setCfgModel(data.model_path || '');
     };
     socket.on('config_state', onConfig);
     socket.emit('get_config');
     return () => socket.off('config_state', onConfig);
-  }, [socket, configLoaded]);
+  }, [socket]);
 
   const applyConfig = useCallback(() => {
     if (!socket) return;

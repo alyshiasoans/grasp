@@ -201,20 +201,50 @@ class LiveSource:
         self.on_log(f"[live] listening on {self.host}:{self.port} …")
         self.on_log(f"[live] {self.n_channels} ch @ {self.Fs:.0f} Hz  cmd={format(cmd, '016b')}")
 
-        self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_sock.bind((self.host, self.port))
-        self._server_sock.listen(1)
+        max_retries = 3
+        accept_timeout = 10  # seconds per attempt
 
-        self.on_log("[live] waiting for amplifier to connect …")
-        self._client_sock, addr = self._server_sock.accept()
-        self.on_log(f"[live] amplifier connected from {addr}")
+        for attempt in range(1, max_retries + 1):
+            if self._stop:
+                raise ConnectionAbortedError("stopped by user")
 
-        self._client_sock.send(cmd.to_bytes(2, byteorder='big', signed=True))
-        self.on_log("[live] command sent — streaming started")
+            # Close any leftover sockets from a previous attempt
+            if self._server_sock:
+                try: self._server_sock.close()
+                except Exception: pass
+                self._server_sock = None
+                time.sleep(0.3)  # let OS release the port
+
+            try:
+                self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self._server_sock.bind((self.host, self.port))
+                self._server_sock.listen(1)
+                self._server_sock.settimeout(accept_timeout)
+
+                self.on_log(f"[live] waiting for amplifier (attempt {attempt}/{max_retries}, "
+                            f"{accept_timeout}s timeout) …")
+                self._client_sock, addr = self._server_sock.accept()
+                self.on_log(f"[live] amplifier connected from {addr}")
+
+                self._client_sock.send(cmd.to_bytes(2, byteorder='big', signed=True))
+                self.on_log("[live] command sent — streaming started")
+                return  # success
+
+            except socket.timeout:
+                self.on_log(f"[live] attempt {attempt}/{max_retries} timed out")
+            except OSError as e:
+                self.on_log(f"[live] attempt {attempt}/{max_retries} error: {e}")
+                time.sleep(1)  # extra wait for port release on bind errors
+
+        raise ConnectionError(f"amplifier did not connect after {max_retries} attempts")
 
     def stream(self):
-        self._connect()
+        try:
+            self._connect()
+        except (ConnectionError, ConnectionAbortedError, OSError) as e:
+            self.on_log(f"[live] connection failed: {e}")
+            return
         samples_per_packet = int(self.Fs) // 16
         packet_bytes = self.n_channels * 2 * samples_per_packet
         self.on_log(f"[live] packet size = {packet_bytes} bytes "
@@ -237,16 +267,19 @@ class LiveSource:
 
     def stop(self):
         self._stop = True
-        try:
-            if self._client_sock:
-                self._client_sock.close()
-        except Exception:
-            pass
+        # Close server socket first to unblock any pending accept()
         try:
             if self._server_sock:
                 self._server_sock.close()
         except Exception:
             pass
+        try:
+            if self._client_sock:
+                self._client_sock.close()
+        except Exception:
+            pass
+        self._server_sock = None
+        self._client_sock = None
 
     def pause(self):
         pass

@@ -342,7 +342,7 @@ function AdminDashboard({ user }) {
 
           {/* Available models */}
           <div className="card admin-table-card">
-            <h3 className="admin-table-title">Available Models</h3>
+            <h3 className="admin-table-title">Models</h3>
             {models.length === 0 ? (
               <p style={{ color: '#999', fontSize: '0.9rem' }}>No models found.</p>
             ) : (
@@ -352,8 +352,7 @@ function AdminDashboard({ user }) {
                     <th></th>
                     <th>Version</th>
                     <th>Accuracy</th>
-                    <th>File</th>
-                    <th>Trained</th>
+                    <th>Date</th>
                     <th>Time</th>
                     <th style={{ textAlign: 'center' }}>Status</th>
                   </tr>
@@ -378,7 +377,6 @@ function AdminDashboard({ user }) {
                           {m.name || `v${m.versionNumber}`}
                         </td>
                         <td>{m.accuracy != null ? `${m.accuracy}%` : '—'}</td>
-                        <td>{m.filePath ? m.filePath.replace(/^models[\\/]/, '') : '—'}</td>
                         <td>{m.trainingDate ? new Date(m.trainingDate + 'Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
                         <td>{m.trainingDate ? new Date(m.trainingDate + 'Z').toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '—'}</td>
                         <td style={{ textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
@@ -396,7 +394,7 @@ function AdminDashboard({ user }) {
                       </tr>
                       {expandedModelId === m.id && (
                         <tr>
-                          <td colSpan={7} style={{ padding: '10px 20px 14px', background: 'transparent', borderTop: 'none' }}>
+                          <td colSpan={6} style={{ padding: '10px 20px 14px', background: 'transparent', borderTop: 'none' }}>
                             <div style={{ fontSize: '0.72rem', color: '#666', fontFamily: 'monospace', letterSpacing: 0.5, marginBottom: 6 }}>
                               TRAINED ON ({m.trainingFiles?.length || 0} files)
                             </div>
