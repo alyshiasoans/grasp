@@ -350,9 +350,6 @@ function AdminDashboard({ user }) {
                           />
                         </td>
                         <td>
-                          <span style={{ marginRight: 6, fontSize: '0.7rem', color: '#666' }}>
-                            {expandedModelId === m.id ? '▾' : '▸'}
-                          </span>
                           {m.name || `v${m.versionNumber}`}
                         </td>
                         <td>{m.accuracy != null ? `${m.accuracy}%` : '—'}</td>
