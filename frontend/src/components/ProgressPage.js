@@ -703,48 +703,12 @@ function ProgressPage({ user, isActive = false }) {
     window.setTimeout(() => window.print(), 100);
   };
 
-  useEffect(() => {
-    if (!isActive || !user?.id) return;
-    loadData();
-  }, [isActive, user?.id]);
-
-  const visibleGestures = useMemo(
-    () => (data?.gestures || []).filter((g) => g.isUnlocked || g.totalTested > 0 || g.correct > 0 || g.incorrect > 0 || g.skipped > 0),
-    [data]
-  );
-
-  const visibleSessions = useMemo(() => {
-    const text = search.trim().toLowerCase();
-    return (data?.sessions || []).filter((session) => {
-      const matchesText = !text
-        || (session.name || '').toLowerCase().includes(text)
-        || formatSessionDateTime(session.startedAt).toLowerCase().includes(text);
-      const matchesDate = !selectedDate || formatSessionDateKey(session.startedAt) === selectedDate;
-      return matchesText && matchesDate;
-    });
-  }, [data?.sessions, search, selectedDate]);
-
-  const handleRenameSession = async (sessionId, sessionName) => {
-    if (!user?.id || !sessionName.trim()) return;
-    await fetch(`${API}/api/progress/sessions/${sessionId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: user.id, sessionName }),
-    });
-    loadData();
-  };
-
-  const handleDeleteSession = async (sessionId, sessionName) => {
-    if (!user?.id) return;
-    if (!window.confirm(`Delete session "${sessionName}"?`)) return;
-    await fetch(`${API}/api/progress/sessions/${sessionId}?userId=${user.id}`, {
-      method: 'DELETE',
-    });
-    loadData();
-  };
-
   if (loading) {
-    return <div className="dashboard-page"><p className="dash-loading">Loading…</p></div>;
+    return (
+      <div className="dashboard-page">
+        <p className="dash-loading">Loading…</p>
+      </div>
+    );
   }
 
   if (error && !data) {
@@ -756,7 +720,11 @@ function ProgressPage({ user, isActive = false }) {
   }
 
   if (!data) {
-    return <div className="dashboard-page"><p className="dash-loading">Could not load progress data.</p></div>;
+    return (
+      <div className="dashboard-page">
+        <p className="dash-loading">Could not load progress data.</p>
+      </div>
+    );
   }
 
   return (
@@ -811,9 +779,11 @@ function ProgressPage({ user, isActive = false }) {
 
       {(visibleExportOptions.gestures && showGestures) && data.gestures.filter((g) => g.isUnlocked).length > 0 && (
         <div className="progress-cards-grid">
-          {visibleGestures.map((g) => (
-            <GestureCard key={g.gestureId} g={g} />
-          ))}
+          {data.gestures
+            .filter((g) => g.isUnlocked)
+            .map((g) => (
+              <GestureCard key={g.gestureId} g={g} />
+            ))}
         </div>
       )}
 

@@ -12,19 +12,23 @@ const SESSION_LENGTHS = [
 ];
 
 function TrainingPage({ socket, connected, user, mode, liveOpts }) {
-  const [gestures, setGestures] = useState([]);
+  // Setup state
+  const [gestures, setGestures] = useState([]);       // available gestures from DB
   const [sessionMinutes, setSessionMinutes] = useState(null);
+
+  // Session state
   const [collecting, setCollecting] = useState(false);
   const [paused, setPaused] = useState(false);
   const [phase, setPhase] = useState(null);
   const [countdown, setCountdown] = useState(0);
-  const [sensorStatus, setSensorStatus] = useState(null);
+  const [sensorStatus, setSensorStatus] = useState(null); // { channels, quality }
   const [logs, setLogs] = useState([]);
   const logBottomRef = useRef(null);
   const [actHistory, setActHistory] = useState([]);
   const [tOnLive, setTOnLive] = useState(T_ON_DEFAULT);
   const [tOffLive, setTOffLive] = useState(T_OFF_DEFAULT);
 
+  // Fetch available gestures on mount
   useEffect(() => {
     if (!user?.id) return;
     fetch(`${API}/api/training/gestures/${user.id}`)
@@ -33,6 +37,7 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
       .catch(() => {});
   }, [user?.id]);
 
+  // Socket listeners
   useEffect(() => {
     if (!socket) return;
 
@@ -122,6 +127,7 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
 
   const handleStop = () => {
     if (!socket) return;
+    // Pause first, then show confirm popup after a tick
     socket.emit('train_pause');
     setPaused(true);
     setTimeout(() => {
@@ -152,6 +158,7 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
 
   return (
     <div className="training-page">
+      {/* ── Session progress bar (visible during collection) ── */}
       {collecting && (
         <div className="train-progress-bar-wrap">
           <div className="train-progress-bar">
@@ -161,6 +168,7 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
         </div>
       )}
 
+      {/* ── Sensor status pill ── */}
       {collecting && sensorStatus && (
         <div className={`train-sensor-pill ${sensorStatus.quality}`}>
           <span className="train-sensor-dot" />
@@ -168,9 +176,11 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
         </div>
       )}
 
+      {/* ── Pre-session setup (only before collecting) ── */}
       {!collecting && !phase && (
         <div className="card test-setup-card">
           <div className="train-setup-grid">
+            {/* Session length */}
             <div className="train-setup-section">
               <label className="train-setup-label">Please choose a training length:</label>
               <div className="train-length-options">
@@ -185,6 +195,7 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
                 ))}
               </div>
             </div>
+
           </div>
 
           <button
@@ -197,6 +208,7 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
         </div>
       )}
 
+      {/* ── Active session: gesture prompt ── */}
       {(collecting || phase) && (
         <div className="card training-prompt-card">
           {phase && (

@@ -682,7 +682,7 @@ const GAME_THEMES = {
 // ── Game ──────────────────────────────────────────────────────────────────────
 function FlappyBallGame({
   activation, tOn, activeNow, decision, targetGesture, gestureColor,
-  onPipeResolve, speedMultiplier, paused, theme, decisionDriven = false,
+  onPipeResolve, speedMultiplier, paused, theme,
 }) {
   const canvasRef = useRef(null);
   const lastDecisionTokenRef = useRef(null);
@@ -704,7 +704,7 @@ function FlappyBallGame({
 
   const L = useRef({
     activation, tOn: tOnVal, activeNow, decision, speedMultiplier, paused,
-    onPipeResolve, targetGesture, gestureColor, theme: null, decisionDriven,
+    onPipeResolve, targetGesture, gestureColor, theme: null,
   });
 
   useEffect(() => {
@@ -718,7 +718,6 @@ function FlappyBallGame({
     L.current.targetGesture   = targetGesture;
     L.current.gestureColor    = gestureColor;
     L.current.theme           = theme;
-    L.current.decisionDriven  = decisionDriven;
   });
 
   function spawnPipe(x) {
@@ -737,15 +736,13 @@ function FlappyBallGame({
   useEffect(() => {
     const g = G.current;
     g.ballY = BALL_GROUND_Y;
-    g.pipes = decisionDriven
-      ? [spawnPipe(BX + PIPE_SPACING)]
-      : [
-          spawnPipe(BX + PIPE_SPACING),
-          spawnPipe(BX + PIPE_SPACING * 2),
-          spawnPipe(BX + PIPE_SPACING * 3),
-        ];
+    g.pipes = [
+      spawnPipe(BX + PIPE_SPACING),
+      spawnPipe(BX + PIPE_SPACING * 2),
+      spawnPipe(BX + PIPE_SPACING * 3),
+    ];
     g.ready = true;
-  }, [decisionDriven]);
+  }, []);
 
   useEffect(() => {
     G.current.pipes.forEach(p => {
@@ -795,7 +792,6 @@ function FlappyBallGame({
       const spd  = BASE_SPEED * (l.speedMultiplier || 1);
       const tOn_ = l.tOn || T_ON_DEFAULT;
       const nextPipe = g.pipes.find(p => !p.evaluated);
-      const HOLD_X = EVAL_X + 28;
 
       // Find the last evaluated pipe whose right edge the ball hasn't fully cleared yet
       // Use generous padding so the ball visually exits the pipe before changing course
@@ -826,35 +822,14 @@ function FlappyBallGame({
       g.ballY = clamp(g.ballY, MARGIN + BR, GH - MARGIN - BR);
 
       if (!l.paused) {
-        g.pipes.forEach((p) => {
-          if (
-            l.decisionDriven &&
-            !p.evaluated &&
-            !p.outcome &&
-            p.x <= HOLD_X &&
-            p.x > EVAL_X
-          ) {
-            p.x = HOLD_X;
-            return;
-          }
-          p.x -= spd;
-        });
+        g.pipes.forEach(p => { p.x -= spd; });
         const last = g.pipes[g.pipes.length - 1];
-        const pendingPipe = g.pipes.find((p) => !p.evaluated);
-        if (l.decisionDriven) {
-          if (!pendingPipe && (!last || last.x <= BX + PIPE_SPACING * 0.75)) {
-            g.pipes.push(spawnPipe((last?.x || BX) + PIPE_SPACING));
-          }
-        } else if (!last || last.x <= BX + PIPE_SPACING * 2) {
+        if (!last || last.x <= BX + PIPE_SPACING * 2) {
           g.pipes.push(spawnPipe((last?.x || BX) + PIPE_SPACING));
         }
         g.pipes = g.pipes.filter(p => p.x > -PW - 20);
 
         g.pipes.forEach(p => {
-          if (l.decisionDriven && !p.outcome && p.x <= EVAL_X) {
-            p.x = EVAL_X + 1;
-            return;
-          }
           if (!p.evaluated && p.x <= EVAL_X) {
             p.evaluated = true;
             const passed = p.outcome === 'pass';
@@ -987,21 +962,9 @@ function VotesPie({ votes }) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-export default function TestingPage({ socket, connected, user, onSessionEnd, onResultsSaved, mode = 'simulated', liveOpts = { host:'0.0.0.0', port:'45454' } }) {
-  const advancedSimulationControls = Boolean(onResultsSaved);
+export default function TestingPage({ socket, connected, user, onSessionEnd, mode = 'simulated', liveOpts = { host:'0.0.0.0', port:'45454' } }) {
 
   const [gestures,      setGestures]      = useState([]);
-  const [models,        setModels]        = useState([]);
-  const [testFiles,     setTestFiles]     = useState([]);
-  const [selectedModelId, setSelectedModelId] = useState('');
-  const [selectedTestFileId, setSelectedTestFileId] = useState('');
-  const [uploadingFile, setUploadingFile] = useState(false);
-  const [selectedUploadFile, setSelectedUploadFile] = useState(null);
-  const [uploadGestureOrder, setUploadGestureOrder] = useState('');
-  const [assetMessage,   setAssetMessage] = useState('');
-  const [thresholds, setThresholds] = useState({ tOn: '2.0', tOff: '1.3' });
-  const [simGestureOrder, setSimGestureOrder] = useState(SIM_GESTURE_ORDER);
-  const [backendDrivenSession, setBackendDrivenSession] = useState(false);
   const [focusGestures, setFocusGestures] = useState([]);
   const [speedMult,     setSpeedMult]     = useState(1.0);
   const [gameTheme,     setGameTheme]     = useState('default');
@@ -1030,15 +993,10 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
   );
   const [actHistory,  setActHistory]  = useState([]);
   const [stats,       setStats]       = useState({ correct:0, incorrect:0, skipped:0, total:0 });
-  const [lastLatencyMs, setLastLatencyMs] = useState(null);
 
   const simRef      = useRef(null);
   const simRunning  = useRef(false);
   const simResetRef = useRef(false);
-  const promptStartRef = useRef(null);
-  const sessionIdRef = useRef(null);
-  const sessionStatusRef = useRef('completed');
-  const endingSessionRef = useRef(false);
   const curRef      = useRef(null);
   const poolRef     = useRef([]);
   const classifyRef = useRef(null);
@@ -1052,14 +1010,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
   useEffect(() => { poolRef.current   = gesturePool;    }, [gesturePool]);
   useEffect(() => { simIdxRef.current = simIdx;         }, [simIdx]);
   useEffect(() => { tOnRef.current    = tOnLive;        }, [tOnLive]);
-  useEffect(() => { sessionIdRef.current = sessionId;   }, [sessionId]);
-
-  useEffect(() => {
-    if (!advancedSimulationControls || mode !== 'simulated' || !backendDrivenSession) return;
-    if (phase === 'prompting' && currentGesture?.name) {
-      promptStartRef.current = performance.now();
-    }
-  }, [phase, currentGesture, advancedSimulationControls, mode, backendDrivenSession]);
 
   useEffect(() => {
     const onFsChange = () => {
@@ -1075,63 +1025,9 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
     if (!user?.id) return;
     fetch(`${API}/api/testing/gestures/${user.id}`)
       .then(r => r.json())
-      .then(d => {
-        setGestures(d.gestures || []);
-        if (advancedSimulationControls) {
-          setUploadGestureOrder((d.gestures || []).map((g) => g.name).join(', '));
-        }
-      })
+      .then(d => setGestures(d.gestures || []))
       .catch(() => {});
-  }, [user?.id, advancedSimulationControls]);
-
-  const gestureIdByName = useMemo(() => {
-    const map = {};
-    gestures.forEach((g) => {
-      map[g.name] = g.gestureId;
-    });
-    return map;
-  }, [gestures]);
-
-  const loadTestingAssets = useCallback(async () => {
-    if (!advancedSimulationControls) return;
-    if (!user?.id) return;
-    try {
-      const [modelsRes, filesRes] = await Promise.all([
-        fetch(`${API}/api/training/models/${user.id}`),
-        fetch(`${API}/api/training/files/${user.id}`),
-      ]);
-      const [modelsData, filesData] = await Promise.all([modelsRes.json(), filesRes.json()]);
-      const nextModels = Array.isArray(modelsData) ? modelsData : [];
-      const nextFiles = Array.isArray(filesData) ? filesData.filter((file) => file.canTrain) : [];
-      setModels(nextModels);
-      setTestFiles(nextFiles);
-      setSelectedModelId((prev) => {
-        if (prev && nextModels.some((m) => String(m.id) === String(prev))) return prev;
-        const active = nextModels.find((m) => m.isActive);
-        return active ? String(active.id) : '';
-      });
-      setSelectedTestFileId((prev) => {
-        if (prev && nextFiles.some((f) => String(f.id) === String(prev))) return prev;
-        return prev ? '' : prev;
-      });
-    } catch (_) {
-      setAssetMessage('Unable to load testing models or files right now.');
-    }
-  }, [user?.id, advancedSimulationControls]);
-
-  useEffect(() => {
-    if (!advancedSimulationControls) return;
-    loadTestingAssets();
-  }, [loadTestingAssets, advancedSimulationControls]);
-
-  useEffect(() => {
-    if (!advancedSimulationControls) {
-      setSimGestureOrder(SIM_GESTURE_ORDER);
-      return;
-    }
-    const selectedFile = testFiles.find((file) => String(file.id) === String(selectedTestFileId));
-    setSimGestureOrder(selectedFile?.gestures?.length ? selectedFile.gestures : SIM_GESTURE_ORDER);
-  }, [selectedTestFileId, testFiles, advancedSimulationControls]);
+  }, [user?.id]);
 
   // ── Pool helpers ──────────────────────────────────────────────────────────
   const buildPool = useCallback((gs, focus) => {
@@ -1149,15 +1045,29 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
     return p.length ? p[Math.floor(Math.random() * p.length)] : null;
   }, []);
 
+  // ── Advance to next gesture ───────────────────────────────────────────────
+  const advanceToNext = useCallback(() => {
+    setPrediction(null); setVotes([]); setPendingResult(null);
+    setRetryCount(0); setGamePaused(false);
+    simResetRef.current = true;
+    if (mode === 'simulated') {
+      const next = (simIdxRef.current + 1) % SIM_GESTURE_ORDER.length;
+      setSimIdx(next); simIdxRef.current = next;
+      setCurrentGesture({ name: SIM_GESTURE_ORDER[next], gestureId: next });
+    } else {
+      setCurrentGesture(pickFromPool(poolRef.current));
+    }
+    setPhase('prompting');
+  }, [mode, pickFromPool]);
+
   // ── Record trial ──────────────────────────────────────────────────────────
   const recordTrial = useCallback(async (gesture, pred, isCorrect, isSkipped = false) => {
-    const sid = sessionIdRef.current;
-    if (!gesture || !sid) return;
+    if (!gesture || !sessionId) return;
     try {
       await fetch(`${API}/api/testing/trial`, {
         method:'POST', headers:{ 'Content-Type':'application/json' },
         body: JSON.stringify({
-          userId:      user?.id, sessionId: sid,
+          userId:      user?.id, sessionId,
           gestureId:   gesture.gestureId,
           prediction:  pred || 'skipped',
           groundTruth: gesture.name,
@@ -1165,14 +1075,12 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
         }),
       });
     } catch (_) {}
-  }, [user, retryCount]);
+  }, [sessionId, user, retryCount]);
 
   // ── Classification handler ────────────────────────────────────────────────
   const decisionSeqRef = useRef(0);
   const pendingResultRef = useRef(null);
-  const phaseRef = useRef(phase);
   useEffect(() => { pendingResultRef.current = pendingResult; }, [pendingResult]);
-  useEffect(() => { phaseRef.current = phase; }, [phase]);
 
   const handleClassification = useCallback((predicted, voteList) => {
     const gesture = curRef.current;
@@ -1186,82 +1094,21 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
       votes: voteList || [],
       isCorrect: predicted === gesture.name,
     });
-  }, [advancedSimulationControls, mode, backendDrivenSession]);
+  }, []);
   classifyRef.current = handleClassification;
-
-  // ── End session ───────────────────────────────────────────────────────────
-  const finalizeSession = useCallback(async (status = 'completed') => {
-    const sid = sessionIdRef.current;
-    if (!sid || endingSessionRef.current) return;
-    endingSessionRef.current = true;
-    sessionStatusRef.current = status;
-    const payload = JSON.stringify({ status });
-    try {
-      await fetch(`${API}/api/testing/session/${sid}/end`, {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json' },
-        body: payload,
-        keepalive: true,
-      });
-    } catch (_) {
-      try {
-        if (navigator?.sendBeacon) {
-          navigator.sendBeacon(
-            `${API}/api/testing/session/${sid}/end`,
-            new Blob([payload], { type: 'application/json' })
-          );
-        }
-      } catch (__){}
-    }
-    sessionIdRef.current = null;
-    setSessionId(null);
-    endingSessionRef.current = false;
-  }, [socket]);
-
-  const endSession = useCallback(async (status = 'completed') => {
-    simRunning.current = false;
-    setBackendDrivenSession(false);
-    if (socket) socket.emit('stop');
-    if (simRef.current) { clearInterval(simRef.current); simRef.current = null; }
-    await finalizeSession(status);
-    if (onResultsSaved) onResultsSaved();
-    setPhase('done');
-  }, [socket, finalizeSession, onResultsSaved]);
-
-  // ── Advance to next gesture ───────────────────────────────────────────────
-  const advanceToNext = useCallback(() => {
-    setPrediction(null); setVotes([]); setPendingResult(null);
-    setRetryCount(0); setGamePaused(false);
-    simResetRef.current = true;
-    if (mode === 'simulated') {
-      const next = simIdxRef.current + 1;
-      if (next >= simGestureOrder.length) {
-        endSession('completed');
-        return;
-      }
-      const nextName = simGestureOrder[next];
-      setSimIdx(next); simIdxRef.current = next;
-      setCurrentGesture({ name: nextName, gestureId: gestureIdByName[nextName] ?? null });
-    } else {
-      setCurrentGesture(pickFromPool(poolRef.current));
-    }
-    setPhase('prompting');
-  }, [mode, pickFromPool, simGestureOrder, endSession, gestureIdByName]);
 
   // ── Mismatch overlay actions ──────────────────────────────────────────────
   const handleCorrect = useCallback(async () => {
     const g = curRef.current;
     setStats(prev => ({ ...prev, correct: prev.correct + 1, total: prev.total + 1 }));
     await recordTrial(g, prediction, true, false);
-    if (socket && backendDrivenSession && mode === 'simulated') socket.emit('resume');
     advanceToNext();
-  }, [prediction, recordTrial, advanceToNext, socket, backendDrivenSession, mode]);
+  }, [prediction, recordTrial, advanceToNext]);
 
   const handleIncorrect = useCallback(async () => {
     const g = curRef.current;
     setStats(prev => ({ ...prev, incorrect: prev.incorrect + 1, total: prev.total + 1 }));
     await recordTrial(g, prediction, false, false);
-    if (socket && backendDrivenSession && mode === 'simulated') socket.emit('resume');
     if (retryCount < MAX_RETRIES - 1) {
       setRetryCount(p => p + 1);
       setPrediction(null); setVotes([]); setPendingResult(null);
@@ -1269,15 +1116,14 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
     } else {
       advanceToNext();
     }
-  }, [prediction, recordTrial, retryCount, advanceToNext, socket, backendDrivenSession, mode]);
+  }, [prediction, recordTrial, retryCount, advanceToNext]);
 
   const handleSkip = useCallback(async () => {
     const g = curRef.current;
     setStats(prev => ({ ...prev, skipped: prev.skipped + 1, total: prev.total + 1 }));
     await recordTrial(g, null, false, true);
-    if (socket && backendDrivenSession && mode === 'simulated') socket.emit('resume');
     advanceToNext();
-  }, [recordTrial, advanceToNext, socket, backendDrivenSession, mode]);
+  }, [recordTrial, advanceToNext]);
 
   const onPipeResolve = useCallback(async ({ passed, predicted, votes: pipeVotes }) => {
     const g = curRef.current;
@@ -1286,7 +1132,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
     if (result?.isCorrect && passed) {
       setStats(prev => ({ ...prev, correct: prev.correct + 1, total: prev.total + 1 }));
       await recordTrial(g, result.predicted, true, false);
-      if (socket && backendDrivenSession && mode === 'simulated') socket.emit('resume');
       advanceToNext();
       return;
     }
@@ -1295,15 +1140,14 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
     setVotes(result?.votes?.length ? result.votes : (pipeVotes || []));
     setPendingResult(null);
     setGamePaused(true);
-    if (socket && backendDrivenSession && mode === 'simulated') socket.emit('pause');
     setPhase('result');
-  }, [recordTrial, advanceToNext, socket, backendDrivenSession, mode]);
+  }, [recordTrial, advanceToNext]);
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── SIMULATION TICKER ─────────────────────────────────────────────────────
   // ═════════════════════════════════════════════════════════════════════════
   useEffect(() => {
-    if (mode !== 'simulated' || backendDrivenSession) return;
+    if (mode !== 'simulated') return;
 
     const TICK       = 50;
     const FPS        = 1000 / TICK;
@@ -1343,7 +1187,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
         if (act >= SIM_T_ON && !fired) {
           fired = true;
           const idx       = simIdxRef.current;
-          const target    = simGestureOrder[idx];
+          const target    = SIM_GESTURE_ORDER[idx];
           const correct   = Math.random() < 0.70;
           const predicted = correct
             ? target
@@ -1393,34 +1237,17 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
 
     simRef.current = iv;
     return () => { clearInterval(iv); simRef.current = null; };
-  }, [mode, backendDrivenSession, simGestureOrder]);
+  }, [mode]);
 
   useEffect(() => {
     simRunning.current = (phase === 'prompting');
   }, [phase]);
 
-  useEffect(() => {
-    const flushSessionOnLeave = () => {
-      const sid = sessionIdRef.current;
-      if (!sid || endingSessionRef.current) return;
-      const payload = JSON.stringify({ status: sessionStatusRef.current || 'aborted' });
-      try {
-        navigator?.sendBeacon?.(
-          `${API}/api/testing/session/${sid}/end`,
-          new Blob([payload], { type: 'application/json' })
-        );
-      } catch (_) {}
-    };
-
-    window.addEventListener('pagehide', flushSessionOnLeave);
-    return () => window.removeEventListener('pagehide', flushSessionOnLeave);
-  }, []);
-
   // ═════════════════════════════════════════════════════════════════════════
   // ── LIVE EMG SOCKET HANDLER ────────────────────────────────────────────
   // ═════════════════════════════════════════════════════════════════════════
   useEffect(() => {
-    if (!socket || (mode !== 'live' && !backendDrivenSession)) return;
+    if (!socket || mode !== 'live') return;
 
     let lastLabel = '';
 
@@ -1461,15 +1288,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
         const ext  = data.extensors || [];
         const flexVal = flex.length  ? flex[flex.length - 1].y  : 0;
         const extVal  = ext.length   ? ext[ext.length  - 1].y   : 0;
-        const actVal = Math.max(flexVal, extVal);
-
-        // Keep the activation strip and game bar responsive for backend-driven sessions.
-        setActivation(actVal);
-        setActHistory(prev => {
-          const n = [...prev, actVal];
-          return n.length > 120 ? n.slice(-120) : n;
-        });
-
         // Scale channel activity for SensorStatusBar:
         // divide by T_ON so values > 1 mean "active"
         const tOn_ = tOnRef.current || T_ON_DEFAULT;
@@ -1487,7 +1305,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
       socket.off('state',  onState);
       socket.off('signal', onSignal);
     };
-  }, [socket, mode, backendDrivenSession]);
+  }, [socket, mode]);
 
   const toggleFullscreen = useCallback(async () => {
     try {
@@ -1502,21 +1320,17 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
   // ── Start session ─────────────────────────────────────────────────────────
   const handleStart = useCallback(async () => {
     const eligibleGs = gestures.filter(g => g.eligible);
-    const firstSimName = simGestureOrder[0];
     const firstGesture = mode === 'simulated'
-      ? { name: firstSimName, gestureId: gestureIdByName[firstSimName] ?? null }
+      ? { name: SIM_GESTURE_ORDER[0], gestureId: 0 }
       : pickFromPool(buildPool(eligibleGs, focusGestures));
     if (!firstGesture) return;
 
     try {
-      simRunning.current = false;
-      simResetRef.current = true;
-
       let sid = null;
       try {
         const r = await fetch(`${API}/api/testing/session`, {
           method:'POST', headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify({ userId: user?.id, mode }),
+          body: JSON.stringify({ userId: user?.id }),
         });
         sid = (await r.json()).sessionId;
       } catch (_) {}
@@ -1526,18 +1340,13 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
         setGesturePool(pool); poolRef.current = pool;
       }
 
-      sessionIdRef.current = sid;
       setSessionId(sid);
-      setBackendDrivenSession(mode === 'live' || (advancedSimulationControls && mode === 'simulated' && Boolean(selectedTestFileId)));
       setSimIdx(0); simIdxRef.current = 0;
       setCurrentGesture(firstGesture);
       setRetryCount(0);
       setStats({ correct:0, incorrect:0, skipped:0, total:0 });
-      setLastLatencyMs(null);
       setPrediction(null); setVotes([]); setPendingResult(null);
       setActHistory([]); setActivation(0);
-      setTOnLive(Number(thresholds.tOn) || T_ON_DEFAULT);
-      setTOffLive(Number(thresholds.tOff) || T_OFF_DEFAULT);
       setGamePaused(false);
 
       // Countdown 3 → 2 → 1 → go
@@ -1559,48 +1368,31 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
     } catch (e) {
       console.error('Failed to start testing session:', e);
     }
-  }, [user, mode, liveOpts, gestures, focusGestures, buildPool, pickFromPool, socket, simGestureOrder, selectedModelId, selectedTestFileId, thresholds, gestureIdByName, advancedSimulationControls]);
+  }, [user, mode, liveOpts, gestures, focusGestures, buildPool, pickFromPool, socket]);
+
+  // ── End session ───────────────────────────────────────────────────────────
+  const endSession = useCallback(async (status = 'completed') => {
+    simRunning.current = false;
+    setPhase('done');
+    if (socket) socket.emit('stop');
+    if (simRef.current) { clearInterval(simRef.current); simRef.current = null; }
+    if (sessionId) {
+      try {
+        await fetch(`${API}/api/testing/session/${sessionId}/end`, {
+          method:'POST', headers:{ 'Content-Type':'application/json' },
+          body: JSON.stringify({ status }),
+        });
+      } catch (_) {}
+    }
+  }, [socket, sessionId]);
 
   const toggleFocus = (name) =>
     setFocusGestures(p => p.includes(name) ? p.filter(n => n !== name) : [...p, name]);
 
-  const handleUploadTestFile = useCallback(async () => {
-    if (!selectedUploadFile || !user?.id) return;
-    setUploadingFile(true);
-    setAssetMessage('');
-    const formData = new FormData();
-    formData.append('userId', String(user.id));
-    formData.append('file', selectedUploadFile);
-    formData.append('gestureOrder', uploadGestureOrder);
-    try {
-      const res = await fetch(`${API}/api/training/files/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Upload failed');
-      setAssetMessage(`${data.file.fileName} uploaded for testing.`);
-      setSelectedTestFileId(String(data.file.id));
-      await loadTestingAssets();
-    } catch (err) {
-      setAssetMessage(err.message);
-    } finally {
-      setUploadingFile(false);
-      setSelectedUploadFile(null);
-      const input = document.getElementById('testing-mat-upload');
-      if (input) input.value = '';
-    }
-  }, [selectedUploadFile, user?.id, uploadGestureOrder, loadTestingAssets]);
-
-  const gColor = GESTURE_COLORS[currentGesture?.name] || '#5c5cff';
-  const eligibleGs = advancedSimulationControls && mode === 'simulated'
-    ? gestures.filter((g) => g.isEnabled !== false)
-    : gestures.filter((g) => g.eligible);
-  const ineligibleGs = mode === 'simulated'
-    ? []
-    : gestures.filter((g) => !g.eligible);
+  const gColor       = GESTURE_COLORS[currentGesture?.name] || '#5c5cff';
+  const eligibleGs   = gestures.filter(g => g.eligible);
+  const ineligibleGs = gestures.filter(g => !g.eligible);
   const accLive      = stats.total > 0 ? Math.round(stats.correct / stats.total * 100) : null;
-  const usingSelectedSimFile = mode === 'simulated' && Boolean(selectedTestFileId);
 
   // ═════════════════════════════════════════════════════════════════════════
   // ── SETUP ─────────────────────────────────────────────────────────────────
@@ -1614,14 +1406,12 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
           <div className="train-setup-section" style={{ gridColumn:'1 / -1' }}>
             <label className="train-setup-label">
               {mode === 'simulated'
-                ? `Simulation gesture order (${simGestureOrder.length} gestures${usingSelectedSimFile ? ', selected file' : ', fixed'})`
+                ? `Simulation gesture order (${SIM_GESTURE_ORDER.length} gestures, fixed)`
                 : 'Eligible Gestures — click to focus (★ = 3× more frequent)'}
             </label>
             {mode === 'simulated' ? (
               <div style={{ marginTop: 6, fontSize: '0.78rem', color: '#888' }}>
-                {advancedSimulationControls && usingSelectedSimFile
-                  ? 'Simulation uses the gesture order stored with the selected test file.'
-                  : 'Simulation uses a fixed internal gesture order.'}
+                Simulation uses a fixed internal gesture order.
               </div>
             ) : (
               <>
@@ -1663,99 +1453,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
               </>
             )}
           </div>
-
-          {advancedSimulationControls && (
-            <>
-              <div className="train-setup-section">
-                <label className="train-setup-label">Model</label>
-                <select
-                  className="training-text-input"
-                  value={selectedModelId}
-                  onChange={(e) => setSelectedModelId(e.target.value)}
-                >
-                  <option value="">Default / Active model</option>
-                  {models.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.modelName} {model.isActive ? '(Active)' : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="train-setup-section">
-                <label className="train-setup-label">Test File</label>
-                <select
-                  className="training-text-input"
-                  value={selectedTestFileId}
-                  onChange={(e) => setSelectedTestFileId(e.target.value)}
-                >
-                  <option value="">Default simulation file</option>
-                  {testFiles.map((file) => (
-                    <option key={file.id} value={file.id}>
-                      {file.fileName}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="train-setup-section" style={{ gridColumn: '1 / -1', alignItems: 'stretch' }}>
-                <label className="train-setup-label">Thresholds</label>
-                <div className="progress-search-row testing-threshold-row">
-                  <div className="testing-threshold-field">
-                    <div className="testing-threshold-label">T_ON</div>
-                    <input
-                      className="training-text-input"
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      value={thresholds.tOn}
-                      onChange={(e) => setThresholds((prev) => ({ ...prev, tOn: e.target.value }))}
-                      placeholder="2.0"
-                    />
-                  </div>
-                  <div className="testing-threshold-field">
-                    <div className="testing-threshold-label">T_OFF</div>
-                    <input
-                      className="training-text-input"
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      value={thresholds.tOff}
-                      onChange={(e) => setThresholds((prev) => ({ ...prev, tOff: e.target.value }))}
-                      placeholder="1.3"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="train-setup-section" style={{ gridColumn:'1 / -1', alignItems:'stretch' }}>
-                <label className="train-setup-label">Upload Test File</label>
-                <div className="training-upload-panel">
-                  <input
-                    id="testing-mat-upload"
-                    type="file"
-                    accept=".mat"
-                    onChange={(e) => setSelectedUploadFile(e.target.files?.[0] || null)}
-                  />
-                  <textarea
-                    className="training-textarea"
-                    value={uploadGestureOrder}
-                    onChange={(e) => setUploadGestureOrder(e.target.value)}
-                    rows={3}
-                    placeholder="Gesture order, comma-separated"
-                  />
-                  <button
-                    className="btn admin-set-active-btn"
-                    onClick={handleUploadTestFile}
-                    disabled={!selectedUploadFile || uploadingFile}
-                  >
-                    {uploadingFile ? 'Uploading...' : 'Upload File'}
-                  </button>
-                </div>
-                {assetMessage && <div className="training-inline-message">{assetMessage}</div>}
-              </div>
-            </>
-          )}
 
           <div className="train-setup-section">
             <label className="train-setup-label">Game Speed</label>
@@ -1843,17 +1540,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
           </div>
           <div style={{ display:'flex', gap:10, justifyContent:'center', marginTop:18 }}>
             <button className="btn btn-start test-new-btn" onClick={() => {
-              simRunning.current = false;
-              simResetRef.current = true;
-              setBackendDrivenSession(false);
               setPhase('setup'); setSessionId(null); setCurrentGesture(null);
-              setSimIdx(0); simIdxRef.current = 0;
-              setCountdown(null);
-              setRetryCount(0);
-              setPrediction(null); setVotes([]); setPendingResult(null);
-              setActivation(0); setActHistory([]);
-              setGamePaused(false);
-              setLastLatencyMs(null);
               setStats({ correct:0, incorrect:0, skipped:0, total:0 });
             }}>New Session</button>
             {onSessionEnd &&
@@ -1889,7 +1576,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
           {accLive !== null && <span style={{ color:'#aaa' }}>acc {accLive}%</span>}
           {mode === 'simulated' && (
             <span style={{ color:'#555', fontSize:'0.7rem' }}>
-              #{simIdx + 1}/{simGestureOrder.length}
+              #{simIdx + 1}/{SIM_GESTURE_ORDER.length}
             </span>
           )}
           {/* {mode === 'live' && (
@@ -1998,7 +1685,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
           <FlappyBallGame
             activation={activation}
             tOn={tOnLive}
-            activeNow={backendDrivenSession || mode === 'live' ? liveStateLabel === 'ACTIVE' : activation >= T_ON_DEFAULT}
+            activeNow={mode === 'live' ? liveStateLabel === 'ACTIVE' : activation >= T_ON_DEFAULT}
             decision={pendingResult}
             targetGesture={currentGesture?.name}
             gestureColor={gColor}
@@ -2006,7 +1693,6 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
             speedMultiplier={speedMult}
             paused={gamePaused}
             theme={GAME_THEMES[gameTheme] || GAME_THEMES.outdoor}
-            decisionDriven={backendDrivenSession || mode === 'live'}
           />
 
           <button

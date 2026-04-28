@@ -20,24 +20,6 @@ body {
   max-width: 1100px;
   margin: 0 auto;
   padding: 32px 24px;
-  position: relative;
-}
-
-.app-next-page-btn {
-  position: fixed;
-  right: 28px;
-  bottom: 24px;
-  z-index: 50;
-  padding: 12px 20px;
-  border-radius: 999px;
-  box-shadow: 0 10px 24px rgba(26, 26, 46, 0.18);
-}
-
-@media (max-width: 700px) {
-  .app-next-page-btn {
-    right: 16px;
-    bottom: 16px;
-  }
 }
 
 /* ── Sidebar ── */
@@ -401,278 +383,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 20px;
-}
-
-.training-management-grid {
-  display: grid;
-  grid-template-columns: 1.2fr 1fr;
-  gap: 20px;
-}
-
-@media (max-width: 900px) {
-  .training-management-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.training-assets-card {
-  padding: 24px;
-}
-
-.training-dataset-list {
-  max-height: 520px;
-  overflow-y: auto;
-  padding-right: 6px;
-}
-
-.training-card-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: flex-start;
-  margin-bottom: 18px;
-}
-
-.training-card-title {
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: #1a1a2e;
-}
-
-.training-card-subtitle {
-  margin-top: 6px;
-  color: #777;
-  font-size: 0.92rem;
-  line-height: 1.5;
-}
-
-.training-refresh-btn {
-  border: 1px solid #d9dce4;
-  background: #fff;
-  color: #4a5568;
-  border-radius: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-  font: inherit;
-}
-
-.training-upload-panel {
-  display: grid;
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.training-textarea,
-.training-text-input {
-  width: 100%;
-  border: 1px solid #d9dce4;
-  border-radius: 6px;
-  padding: 14px 16px;
-  font: inherit;
-  color: #1a1a2e;
-  background: #fff;
-}
-
-.training-textarea {
-  resize: vertical;
-  min-height: 112px;
-}
-
-.training-inline-message {
-  margin-bottom: 14px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: #f5f7ff;
-  color: #4252a4;
-  font-size: 0.9rem;
-}
-
-.training-empty-text {
-  color: #888;
-  font-size: 0.92rem;
-}
-
-.training-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.training-list-item,
-.training-model-item {
-  border: 1px solid #e6e8ef;
-  border-radius: 12px;
-  padding: 14px;
-  background: #fbfcfe;
-}
-
-.training-list-item.selected {
-  border-color: #5b6abf;
-  box-shadow: 0 0 0 3px rgba(91, 106, 191, 0.08);
-}
-
-.training-dataset-main {
-  display: grid;
-  grid-template-columns: 20px 1fr;
-  gap: 12px;
-  align-items: flex-start;
-}
-
-.training-dataset-main.disabled {
-  opacity: 0.65;
-}
-
-.training-item-title {
-  font-weight: 600;
-  color: #1a1a2e;
-  margin-bottom: 4px;
-}
-
-.training-file-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 6px;
-}
-
-.training-file-name-row {
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
-}
-
-.training-file-name-input {
-  flex: 1;
-  min-width: 0;
-}
-
-.training-file-save-btn {
-  align-self: flex-start;
-}
-
-.training-file-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-}
-
-.training-item-meta {
-  font-size: 0.88rem;
-  color: #7a8194;
-  line-height: 1.5;
-}
-
-.training-show-order-btn {
-  margin-top: 0;
-  margin-bottom: 0;
-}
-
-.training-file-delete-btn {
-  margin-top: 0;
-}
-
-.testing-threshold-row {
-  align-items: flex-start;
-}
-
-.testing-threshold-field {
-  flex: 1;
-  min-width: 0;
-}
-
-.testing-threshold-label {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: #7a8194;
-  margin-bottom: 6px;
-  letter-spacing: 0.04em;
-}
-
-.training-danger-btn {
-  margin-top: 12px;
-  border: none;
-  background: #fff1f0;
-  color: #c0392b;
-  border-radius: 8px;
-  padding: 8px 12px;
-  cursor: pointer;
-  font: inherit;
-  font-weight: 600;
-}
-
-.training-model-builder {
-  display: flex;
-  gap: 12px;
-  margin-top: 16px;
-  margin-bottom: 12px;
-}
-
-@media (max-width: 700px) {
-  .training-model-builder {
-    flex-direction: column;
-  }
-
-  .training-file-header,
-  .training-file-name-row,
-  .training-file-actions {
-    flex-direction: column;
-    align-items: stretch;
-  }
-}
-
-.training-model-row {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 10px;
-  align-items: flex-start;
-}
-
-@media (max-width: 700px) {
-  .training-model-row {
-    flex-direction: column;
-  }
-}
-
-.training-list .training-model-row .training-text-input {
-  min-height: 52px;
-}
-
-.training-order-textarea {
-  min-height: 96px;
-  line-height: 1.5;
-  flex: 1;
-}
-
-.training-list .training-model-row .admin-status-inactive {
-  min-width: 120px;
-  align-self: stretch;
-}
-
-.training-model-footer {
-  margin-top: 12px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-
-.training-session-log-card {
-  padding: 20px 24px;
-}
-
-.training-session-log {
-  margin-top: 12px;
-  max-height: 220px;
-  overflow-y: auto;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: 0.88rem;
-  line-height: 1.6;
-  color: #444;
 }
 
 /* Progress bar */
@@ -1657,8 +1367,6 @@ body {
   display: flex;
   gap: 16px;
   margin-top: 4px;
-  flex-wrap: wrap;
-  justify-content: center;
 }
 
 .progress-gesture-stat {
@@ -2397,25 +2105,10 @@ body {
   box-shadow: 0 0 0 3px rgba(91,106,191,0.12);
 }
 
-.admin-mode-toggle {
-  margin-top: 16px;
-  max-width: 360px;
-}
-
-.admin-section-switcher {
-  margin-top: 16px;
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
 .admin-summary-row {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 16px;
-}
-@media (max-width: 1100px) {
-  .admin-summary-row { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 700px) {
   .admin-summary-row { grid-template-columns: 1fr; }
@@ -2442,38 +2135,6 @@ body {
 
 .admin-table-card {
   overflow-x: auto;
-}
-
-.admin-simulation-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-.admin-simulation-subtitle {
-  margin-top: 6px;
-  color: #777;
-  font-size: 0.92rem;
-  line-height: 1.5;
-}
-
-.admin-simulation-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.9fr);
-  gap: 16px;
-}
-
-@media (max-width: 980px) {
-  .admin-simulation-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .admin-simulation-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 .admin-table-title {
@@ -2661,15 +2322,6 @@ body {
   max-height: 200px;
   overflow-y: auto;
   line-height: 1.7;
-}
-
-.admin-inline-callout {
-  margin-bottom: 14px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  background: #f5f7ff;
-  color: #4252a4;
-  font-size: 0.92rem;
 }
 
 /* ─── Live EMG Connection Popup ─── */

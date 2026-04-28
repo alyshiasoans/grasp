@@ -1,13 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { API } from '../constants';
 
-function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liveOpts }) {
+function AdminDashboard({ user }) {
   const [users, setUsers] = useState([]);
   const [selectedUserId, setSelectedUserId] = useState('');
-  const [selectedMode, setSelectedMode] = useState('simulated');
   const [progress, setProgress] = useState(null);
-  const [models, setModels] = useState([]);
   const [trainingFiles, setTrainingFiles] = useState([]);
+  const [models, setModels] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedFileIds, setSelectedFileIds] = useState([]);
   const [training, setTraining] = useState(false);
@@ -20,13 +19,15 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
   const [filePage, setFilePage] = useState(0);
   const FILES_PER_PAGE = 10;
 
+  // Load all users on mount
   useEffect(() => {
     fetch(`${API}/api/admin/users`)
       .then((r) => r.json())
-      .then((data) => setUsers(Array.isArray(data) ? data : []))
+      .then((data) => setUsers(data))
       .catch(() => {});
   }, []);
 
+  // Load selected user's progress + training files + models
   useEffect(() => {
     if (!selectedUserId) { setProgress(null); setTrainingFiles([]); setModels([]); setSelectedFileIds([]); setTrainLogs([]); setGestureUnlocks([]); setFilePage(0); return; }
     setLoading(true);
@@ -46,10 +47,6 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
       .catch(() => setLoading(false));
   }, [selectedUserId]);
 
-  useEffect(() => {
-    setSelectedFileIds((prev) => prev.filter((id) => trainingFiles.some((file) => file.id === id && file.canTrain)));
-  }, [trainingFiles]);
-
   const handleSetActiveModel = (modelId) => {
     fetch(`${API}/api/admin/models/${selectedUserId}/set-active`, {
       method: 'POST',
@@ -58,8 +55,9 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
     })
       .then((r) => r.json())
       .then(() => {
-        setModels((prev) => prev.map((m) => ({ ...m, isActive: m.id === modelId })));
-        setAssetMessage('Active model updated.');
+        setModels((prev) =>
+          prev.map((m) => ({ ...m, isActive: m.id === modelId }))
+        );
       })
       .catch(() => {});
   };
@@ -158,214 +156,18 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
       .then((data) => {
         if (data.ok) {
           setGestureUnlocks((prev) =>
-            prev.map((g) => (g.gestureId === gestureId ? { ...g, isUnlocked: data.isUnlocked } : g))
+            prev.map((g) => g.gestureId === gestureId ? { ...g, isUnlocked: data.isUnlocked } : g)
           );
-          setProgress((prev) => prev ? ({
-            ...prev,
-            gestures: (prev.gestures || []).map((g) =>
-              g.gestureId === gestureId ? { ...g, isUnlocked: data.isUnlocked } : g
-            ),
-          }) : prev);
         }
       })
       .catch(() => {});
-  };
-
-  const handleUpload = async () => {
-    if (!selectedUploadFile || !selectedUserId) return;
-    setUploading(true);
-    setAssetMessage('');
-    const formData = new FormData();
-    formData.append('userId', selectedUserId);
-    formData.append('file', selectedUploadFile);
-    formData.append('gestureOrder', uploadGestureOrder);
-
-    try {
-      const res = await fetch(`${API}/api/training/files/upload`, {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Upload failed');
-      setSelectedUploadFile(null);
-      setAssetMessage(`${data.file.fileName} uploaded to simulation assets.`);
-      await loadAdminData({ showLoading: true, refreshAssetsOnly: true });
-    } catch (err) {
-      setAssetMessage(err.message);
-    } finally {
-      setUploading(false);
-      const input = document.getElementById('admin-simulation-upload');
-      if (input) input.value = '';
-    }
-  };
-
-  const handleDeleteFile = async (fileId, fileName) => {
-    if (!selectedUserId) return;
-    if (!window.confirm(`Delete dataset "${fileName}"?`)) return;
-    setAssetMessage('');
-    try {
-      const res = await fetch(`${API}/api/training/files/${fileId}?userId=${selectedUserId}`, {
-        method: 'DELETE',
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Delete failed');
-      setSelectedFileIds((prev) => prev.filter((id) => id !== fileId));
-      setTrainingFiles((prev) => prev.filter((file) => file.id !== fileId));
-      setAssetMessage(`${fileName} deleted.`);
-    } catch (err) {
-      setAssetMessage(err.message);
-    }
-  };
-
-  const handleSaveGestureOrder = async (fileId) => {
-    if (!selectedUserId) return;
-    const nextOrder = (editingFileOrders[fileId] || '').trim();
-    if (!nextOrder) return;
-    setAssetMessage('');
-    try {
-      const res = await fetch(`${API}/api/training/files/${fileId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: Number(selectedUserId), gestureOrder: nextOrder }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Save failed');
-      setTrainingFiles((prev) => prev.map((file) => (file.id === fileId ? data.file : file)));
-      setEditingFileOrders((prev) => ({
-        ...prev,
-        [fileId]: Array.isArray(data.file.gestures) ? data.file.gestures.join(', ') : nextOrder,
-      }));
-      setAssetMessage(`Updated gesture order for ${data.file.fileName}.`);
-    } catch (err) {
-      setAssetMessage(err.message);
-    }
-  };
-
-  const handleRenameFile = async (fileId) => {
-    if (!selectedUserId) return;
-    const nextName = (editingFileNames[fileId] || '').trim();
-    if (!nextName) return;
-    setAssetMessage('');
-    try {
-      const res = await fetch(`${API}/api/training/files/${fileId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: Number(selectedUserId), fileName: nextName }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Rename failed');
-      setTrainingFiles((prev) => prev.map((file) => (file.id === fileId ? data.file : file)));
-      setEditingFileNames((prev) => ({ ...prev, [fileId]: data.file.fileName || nextName }));
-      setAssetMessage(`Renamed dataset to ${data.file.fileName}.`);
-    } catch (err) {
-      setAssetMessage(err.message);
-    }
-  };
-
-  const handleTrainModel = async () => {
-    if (!selectedUserId || selectedFileIds.length === 0) return;
-    setTrainingModel(true);
-    setTrainLogs([]);
-    setAssetMessage('');
-    try {
-      const res = await fetch(`${API}/api/admin/train-model`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: Number(selectedUserId),
-          trainingFileIds: selectedFileIds,
-          modelName,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Training failed');
-      setTrainLogs(data.logs || []);
-      setModelName('');
-      setAssetMessage(data.modelName ? `${data.modelName} trained successfully.` : 'Model trained successfully.');
-      await loadAdminData({ showLoading: true, refreshAssetsOnly: true });
-    } catch (err) {
-      setTrainLogs((prev) => [...prev, `Error: ${err.message}`]);
-    } finally {
-      setTrainingModel(false);
-    }
-  };
-
-  const handleRenameModel = async (modelId) => {
-    if (!selectedUserId) return;
-    const nextName = (editingNames[modelId] || '').trim();
-    if (!nextName) return;
-    setAssetMessage('');
-    try {
-      const res = await fetch(`${API}/api/training/models/${modelId}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: Number(selectedUserId), modelName: nextName }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Rename failed');
-      setModels((prev) => prev.map((m) => (m.id === modelId ? data.model : m)));
-      setAssetMessage(`Renamed to ${nextName}.`);
-    } catch (err) {
-      setAssetMessage(err.message);
-    }
-  };
-
-  const handleDeleteModel = async (modelId, name) => {
-    if (!selectedUserId) return;
-    if (!window.confirm(`Delete model "${name}"?`)) return;
-    setAssetMessage('');
-    try {
-      const res = await fetch(`${API}/api/training/models/${modelId}?userId=${selectedUserId}`, {
-        method: 'DELETE',
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Delete failed');
-      setModels((prev) => prev.filter((m) => m.id !== modelId));
-      setAssetMessage(`${name} deleted.`);
-    } catch (err) {
-      setAssetMessage(err.message);
-    }
-  };
-
-  const toggleFileSelection = (fileId) => {
-    setSelectedFileIds((prev) =>
-      prev.includes(fileId) ? prev.filter((id) => id !== fileId) : [...prev, fileId]
-    );
-  };
-
-  const toggleShowFileOrder = (fileId) => {
-    setShowFileOrders((prev) => ({ ...prev, [fileId]: !prev[fileId] }));
-  };
-
-  const modeLabel = selectedMode === 'live' ? 'Live EMG' : 'Simulated';
-  const modeAccuracy = selectedMode === 'live' ? (progress?.liveAccuracy ?? 0) : (progress?.simulatedAccuracy ?? 0);
-  const modeTested = (progress?.gestures || []).reduce(
-    (sum, g) => sum + (selectedMode === 'live' ? (g.liveTested || 0) : (g.simulatedTested || 0)),
-    0
-  );
-  const modeGestures = (progress?.gestures || [])
-    .filter((g) => selectedMode === 'simulated' || g.isUnlocked)
-    .map((g) => ({
-      ...g,
-      modeAccuracy: selectedMode === 'live' ? (g.liveAccuracy || 0) : (g.simulatedAccuracy || 0),
-      modeTested: selectedMode === 'live' ? (g.liveTested || 0) : (g.simulatedTested || 0),
-    }));
-
-  const trainableFiles = useMemo(
-    () => trainingFiles.filter((file) => file.canTrain),
-    [trainingFiles]
-  );
-  const activeModel = models.find((model) => model.isActive);
-  const handleTestingSaved = () => {
-    setProgressRefreshToken((prev) => prev + 1);
-    loadAdminData({ showLoading: false });
   };
 
   return (
     <div className="dashboard-page">
       <div className="card dash-welcome-card">
         <h2 className="dash-welcome-title">Welcome, {user?.firstName}!</h2>
-        <p className="dash-welcome-subtitle">Select a user and manage their admin, progress, and simulation updates here.</p>
+        <p className="dash-welcome-subtitle">Select a user to view their progress.</p>
 
         <select
           className="admin-user-select"
@@ -379,37 +181,17 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
             </option>
           ))}
         </select>
-
-        {selectedUserId && activePage === 'dashboard' && (
-          <div className="mode-toggle admin-mode-toggle">
-            <button
-              className={`btn btn-mode ${selectedMode === 'simulated' ? 'active' : ''}`}
-              onClick={() => setSelectedMode('simulated')}
-            >
-              Simulated
-            </button>
-            <button
-              className={`btn btn-mode ${selectedMode === 'live' ? 'active' : ''}`}
-              onClick={() => setSelectedMode('live')}
-            >
-              Live EMG
-            </button>
-          </div>
-        )}
       </div>
 
       {loading && <p style={{ textAlign: 'center', color: '#999' }}>Loading…</p>}
 
-      {progress && selectedUser && activePage === 'dashboard' && (
+      {progress && selectedUser && (
         <>
+          {/* Summary row */}
           <div className="admin-summary-row">
             <div className="card admin-stat-card">
-              <div className="admin-stat-value">{modeAccuracy}%</div>
-              <div className="admin-stat-label">{modeLabel} Accuracy</div>
-            </div>
-            <div className="card admin-stat-card">
-              <div className="admin-stat-value">{modeTested}</div>
-              <div className="admin-stat-label">{modeLabel} Attempts</div>
+              <div className="admin-stat-value">{progress.overallAccuracy}%</div>
+              <div className="admin-stat-label">Overall Accuracy</div>
             </div>
             <div className="card admin-stat-card">
               <div className="admin-stat-value">{progress.gesturesTrained} / {progress.totalGestures}</div>
@@ -421,6 +203,7 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
             </div>
           </div>
 
+          {/* Gesture table */}
           <div className="card admin-table-card">
             <h3 className="admin-table-title">Gesture Progress</h3>
             <table className="admin-gesture-table">
@@ -428,8 +211,8 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
                 <tr>
                   <th>Gesture</th>
                   <th>Times Trained</th>
-                  <th>{modeLabel} Tested</th>
-                  <th>{modeLabel} Accuracy</th>
+                  <th>Times Tested</th>
+                  <th>Accuracy</th>
                   <th>Avg Confidence</th>
                   <th style={{ textAlign: 'center' }}>Status</th>
                 </tr>
@@ -443,9 +226,7 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
                     <td>{g.accuracy}%</td>
                     <td>{g.avgConfidence ?? '—'}%</td>
                     <td style={{ textAlign: 'center' }}>
-                      {selectedMode === 'simulated' ? (
-                        <span className="admin-status-active">Unlocked</span>
-                      ) : g.isUnlocked ? (
+                      {g.isUnlocked ? (
                         <button
                           className="admin-status-active"
                           style={{ cursor: 'pointer', border: 'none', background: 'none' }}
@@ -647,22 +428,6 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
               </div>
             )}
           </div>
-
-          <div className="card admin-table-card">
-            <h3 className="admin-table-title">Run Simulation Test</h3>
-            <p className="admin-simulation-subtitle">
-              Start a simulated testing session for {selectedUser.firstName} {selectedUser.lastName}. Results save directly into Overview and the user&apos;s simulated progress history.
-            </p>
-          </div>
-
-          <TestingPage
-            socket={socket}
-            connected={connected}
-            user={selectedUser}
-            mode="simulated"
-            liveOpts={liveOpts}
-            onResultsSaved={handleTestingSaved}
-          />
         </>
       )}
 

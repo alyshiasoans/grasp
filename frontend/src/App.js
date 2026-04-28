@@ -23,7 +23,6 @@ function App() {
   const [deviceError, setDeviceError] = useState('');
   const [batteryLevel, setBatteryLevel] = useState(null);
   const socketRef = useRef(null);
-  const pageOrder = ['dashboard', 'training', 'testing', 'progress'];
 
   useEffect(() => {
     const socket = io(BACKEND_URL, {
@@ -87,33 +86,16 @@ function App() {
     setShowLivePopup(false);
   };
 
-  const handleNextPage = () => {
-    const currentIndex = pageOrder.indexOf(activePage);
-    if (currentIndex === -1 || currentIndex >= pageOrder.length - 1) return;
-    setActivePage(pageOrder[currentIndex + 1]);
-  };
-
   if (!user) {
     return <LoginPage onLogin={setUser} />;
   }
-
-  const headerTitle = user?.isAdmin
-    ? activePage === 'simulation'
-      ? 'Admin Simulation'
-      : 'Admin Overview'
-    : activePage === 'training'
-      ? 'Gesture Training'
-      : activePage === 'testing'
-        ? 'Gesture Testing'
-        : activePage === 'progress'
-          ? 'Progress'
-          : 'Dashboard';
 
   return (
     <div className="app-layout">
       <Sidebar activePage={activePage} onNavigate={setActivePage} user={user} onLogout={() => { setUser(null); setActivePage('dashboard'); }} deviceStatus={deviceStatus} batteryLevel={batteryLevel} onRefreshBattery={() => socketRef.current?.emit('get_battery')} />
 
       <div className="app-main">
+        {/* Header */}
         <header className="header">
           <h1 className="title">
             {user?.isAdmin
@@ -143,13 +125,7 @@ function App() {
         </header>
 
         {user?.isAdmin ? (
-          <AdminDashboard
-            user={user}
-            activePage={activePage}
-            socket={socketRef.current}
-            connected={connected}
-            liveOpts={liveOpts}
-          />
+          <AdminDashboard user={user} />
         ) : (
           <>
             <div style={{ display: activePage === 'dashboard' ? 'block' : 'none' }}>
@@ -189,12 +165,6 @@ function App() {
                 activePage={activePage}
               />
             </div>
-
-            {activePage !== 'progress' && (
-              <button className="btn app-next-page-btn" onClick={handleNextPage}>
-                Next
-              </button>
-            )}
           </>
         )}
       </div>

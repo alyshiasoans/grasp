@@ -10,8 +10,7 @@ const NAV_ITEMS = [
 ];
 
 const ADMIN_NAV_ITEMS = [
-  { key: 'dashboard', label: 'Overview', icon: '⊞' },
-  { key: 'simulation', label: 'Simulation', icon: '▶' },
+  { key: 'dashboard', label: 'Dashboard', icon: '⊞' },
 ];
 
 function Sidebar({ activePage, onNavigate, user, onLogout, deviceStatus, batteryLevel, onRefreshBattery }) {
