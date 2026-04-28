@@ -85,7 +85,24 @@ function LivePredictionPage({ socket, connected, user, mode, liveOpts, activePag
     if (!isNaN(mvN) && mvN > 0) update.min_votes = mvN;
     update.model_path = cfgModel || '';
     socket.emit('update_config', update);
-  }, [socket, cfgTOn, cfgTOff, cfgMinVotes, cfgModel]);
+
+    // Persistently set the selected model as the user's active model
+    const uid = user?.id;
+    if (uid && cfgModel) {
+      const selected = modelList.find(m => m.filePath === cfgModel);
+      if (selected?.id) {
+        fetch(`${API}/api/settings/models/${uid}/set-active`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ modelId: selected.id }),
+        })
+          .then(() => {
+            setModelList(prev => prev.map(m => ({ ...m, isActive: m.id === selected.id })));
+          })
+          .catch(() => {});
+      }
+    }
+  }, [socket, cfgTOn, cfgTOff, cfgMinVotes, cfgModel, user?.id, modelList]);
 
   // ── Socket listeners ────────────────────────────────────────────────────
   useEffect(() => {

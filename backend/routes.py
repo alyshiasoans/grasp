@@ -507,6 +507,7 @@ def list_models():
     if user_id:
         models = ModelVersion.query.filter_by(user_id=user_id).order_by(ModelVersion.version_number.desc()).all()
         return jsonify([{
+            "id": m.id,
             "name": m.name or f"Model v{m.version_number}",
             "filePath": m.file_path,
             "accuracy": m.accuracy,
