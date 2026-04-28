@@ -1,8 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import ProgressPage from './ProgressPage';
-import TestingPage from './TestingPage';
-
-const API = 'http://localhost:5050';
+import React, { useState, useEffect } from 'react';
+import { API } from '../constants';
 
 function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liveOpts }) {
   const [users, setUsers] = useState([]);
@@ -12,90 +9,16 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
   const [models, setModels] = useState([]);
   const [trainingFiles, setTrainingFiles] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [refreshingAssets, setRefreshingAssets] = useState(false);
-  const [gestureUnlocks, setGestureUnlocks] = useState([]);
   const [selectedFileIds, setSelectedFileIds] = useState([]);
+  const [training, setTraining] = useState(false);
   const [trainLogs, setTrainLogs] = useState([]);
-  const [trainingModel, setTrainingModel] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [assetMessage, setAssetMessage] = useState('');
-  const [selectedUploadFile, setSelectedUploadFile] = useState(null);
-  const [uploadGestureOrder, setUploadGestureOrder] = useState('');
-  const [modelName, setModelName] = useState('');
-  const [editingNames, setEditingNames] = useState({});
-  const [editingFileOrders, setEditingFileOrders] = useState({});
-  const [editingFileNames, setEditingFileNames] = useState({});
-  const [showFileOrders, setShowFileOrders] = useState({});
-  const [progressRefreshToken, setProgressRefreshToken] = useState(0);
-
-  const selectedUser = users.find((u) => u.id === Number(selectedUserId));
-
-  const syncAssetEditors = (filesData, modelsData, gesturesData) => {
-    setTrainingFiles(filesData);
-    setModels(modelsData);
-    setGestureUnlocks(gesturesData);
-    setEditingNames(
-      modelsData.reduce((acc, item) => {
-        acc[item.id] = item.modelName || '';
-        return acc;
-      }, {})
-    );
-    setEditingFileOrders(
-      filesData.reduce((acc, item) => {
-        acc[item.id] = Array.isArray(item.gestures) ? item.gestures.join(', ') : '';
-        return acc;
-      }, {})
-    );
-    setEditingFileNames(
-      filesData.reduce((acc, item) => {
-        acc[item.id] = item.fileName || '';
-        return acc;
-      }, {})
-    );
-    if (!uploadGestureOrder.trim()) {
-      setUploadGestureOrder((gesturesData || []).map((g) => g.name).join(', '));
-    }
-  };
-
-  const loadAdminData = async ({ showLoading = false, refreshAssetsOnly = false } = {}) => {
-    if (!selectedUserId) return;
-    if (showLoading && !refreshAssetsOnly) setLoading(true);
-    if (showLoading && refreshAssetsOnly) setRefreshingAssets(true);
-    try {
-      const requests = [
-        fetch(`${API}/api/admin/models/${selectedUserId}`).then((r) => r.json()),
-        fetch(`${API}/api/admin/training-files/${selectedUserId}`).then((r) => r.json()),
-        fetch(`${API}/api/admin/gestures/${selectedUserId}`).then((r) => r.json()),
-      ];
-      if (!refreshAssetsOnly) {
-        requests.unshift(fetch(`${API}/api/dashboard/${selectedUserId}`).then((r) => r.json()));
-      }
-      const data = await Promise.all(requests);
-      if (refreshAssetsOnly) {
-        const [modelsData, filesData, gesturesData] = data;
-        syncAssetEditors(
-          Array.isArray(filesData) ? filesData : [],
-          Array.isArray(modelsData) ? modelsData : [],
-          Array.isArray(gesturesData) ? gesturesData : []
-        );
-      } else {
-        const [dashData, modelsData, filesData, gesturesData] = data;
-        setProgress(dashData);
-        syncAssetEditors(
-          Array.isArray(filesData) ? filesData : [],
-          Array.isArray(modelsData) ? modelsData : [],
-          Array.isArray(gesturesData) ? gesturesData : []
-        );
-      }
-    } catch (err) {
-      if (refreshAssetsOnly) {
-        setAssetMessage(err?.message || 'Unable to refresh simulation assets right now.');
-      }
-    } finally {
-      setLoading(false);
-      setRefreshingAssets(false);
-    }
-  };
+  const [namePopup, setNamePopup] = useState(null);
+  const [popupName, setPopupName] = useState('');
+  const [gestureUnlocks, setGestureUnlocks] = useState([]);
+  const [expandedModelId, setExpandedModelId] = useState(null);
+  const [selectedModelIds, setSelectedModelIds] = useState([]);
+  const [filePage, setFilePage] = useState(0);
+  const FILES_PER_PAGE = 10;
 
   useEffect(() => {
     fetch(`${API}/api/admin/users`)
@@ -105,26 +28,22 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
   }, []);
 
   useEffect(() => {
-    if (!selectedUserId) {
-      setProgress(null);
-      setModels([]);
-      setTrainingFiles([]);
-      setGestureUnlocks([]);
-      setSelectedFileIds([]);
-      setTrainLogs([]);
-      setAssetMessage('');
-      setModelName('');
-      setShowFileOrders({});
-      setUploadGestureOrder('');
-      return;
-    }
-    setSelectedFileIds([]);
-    setTrainLogs([]);
-    setAssetMessage('');
-    setModelName('');
-    setShowFileOrders({});
-    setUploadGestureOrder('');
-    loadAdminData({ showLoading: true });
+    if (!selectedUserId) { setProgress(null); setTrainingFiles([]); setModels([]); setSelectedFileIds([]); setTrainLogs([]); setGestureUnlocks([]); setFilePage(0); return; }
+    setLoading(true);
+    Promise.all([
+      fetch(`${API}/api/dashboard/${selectedUserId}`).then((r) => r.json()),
+      fetch(`${API}/api/admin/training-files/${selectedUserId}`).then((r) => r.json()),
+      fetch(`${API}/api/admin/models/${selectedUserId}`).then((r) => r.json()),
+      fetch(`${API}/api/admin/gestures/${selectedUserId}`).then((r) => r.json()),
+    ])
+      .then(([dashData, filesData, modelsData, gesturesData]) => {
+        setProgress(dashData);
+        setTrainingFiles(filesData);
+        setModels(modelsData);
+        setGestureUnlocks(gesturesData);
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
   }, [selectedUserId]);
 
   useEffect(() => {
@@ -144,6 +63,90 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
       })
       .catch(() => {});
   };
+
+  const toggleModelSelection = (modelId) => {
+    setSelectedModelIds((prev) =>
+      prev.includes(modelId) ? prev.filter((id) => id !== modelId) : [...prev, modelId]
+    );
+  };
+
+  const handleDeleteModels = () => {
+    if (selectedModelIds.length === 0) return;
+    if (!window.confirm(`Delete ${selectedModelIds.length} model(s)? This cannot be undone.`)) return;
+    Promise.all(
+      selectedModelIds.map((id) =>
+        fetch(`${API}/api/admin/models/${id}`, { method: 'DELETE' }).then((r) => r.json())
+      )
+    ).then(() => {
+      setModels((prev) => prev.filter((m) => !selectedModelIds.includes(m.id)));
+      if (selectedModelIds.includes(expandedModelId)) setExpandedModelId(null);
+      setSelectedModelIds([]);
+    }).catch(() => {});
+  };
+
+  const toggleFileSelection = (fileId) => {
+    setSelectedFileIds((prev) =>
+      prev.includes(fileId) ? prev.filter((id) => id !== fileId) : [...prev, fileId]
+    );
+  };
+
+  const selectAllFiles = () => {
+    const trainableFiles = trainingFiles.filter((f) => f.fileName.endsWith('.mat') || f.fileName.endsWith('.npz'));
+    if (selectedFileIds.length === trainableFiles.length) {
+      setSelectedFileIds([]);
+    } else {
+      setSelectedFileIds(trainableFiles.map((f) => f.id));
+    }
+  };
+
+  const handleTrainModel = () => {
+    if (selectedFileIds.length === 0) return;
+    setTraining(true);
+    setTrainLogs([]);
+    fetch(`${API}/api/admin/train-model`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: Number(selectedUserId), trainingFileIds: selectedFileIds }),
+    })
+      .then((r) => r.json())
+      .then((data) => {
+        setTrainLogs(data.logs || []);
+        setTraining(false);
+        if (data.modelId) {
+          setNamePopup({ modelId: data.modelId, versionNumber: data.versionNumber });
+          setPopupName('');
+          // Refresh models list
+          fetch(`${API}/api/admin/models/${selectedUserId}`)
+            .then((r) => r.json())
+            .then((modelsData) => setModels(modelsData))
+            .catch(() => {});
+        }
+      })
+      .catch((err) => {
+        setTrainLogs([`Error: ${err.message}`]);
+        setTraining(false);
+      });
+  };
+
+  const handleSaveModelName = () => {
+    if (!namePopup) return;
+    const trimmed = popupName.trim();
+    if (trimmed) {
+      fetch(`${API}/api/admin/models/${namePopup.modelId}/rename`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      })
+        .then((r) => r.json())
+        .then(() => {
+          setModels((prev) => prev.map((m) => m.id === namePopup.modelId ? { ...m, name: trimmed } : m));
+        })
+        .catch(() => {});
+    }
+    setNamePopup(null);
+  };
+
+  const selectedUser = users.find((u) => u.id === Number(selectedUserId));
 
   const handleToggleUnlock = (gestureId, currentlyUnlocked) => {
     fetch(`${API}/api/admin/gestures/${selectedUserId}/unlock`, {
@@ -419,7 +422,7 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
           </div>
 
           <div className="card admin-table-card">
-            <h3 className="admin-table-title">Gesture Progress for {selectedUser.firstName} {selectedUser.lastName} ({modeLabel})</h3>
+            <h3 className="admin-table-title">Gesture Progress</h3>
             <table className="admin-gesture-table">
               <thead>
                 <tr>
@@ -428,34 +431,6 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
                   <th>{modeLabel} Tested</th>
                   <th>{modeLabel} Accuracy</th>
                   <th>Avg Confidence</th>
-                </tr>
-              </thead>
-              <tbody>
-                {modeGestures.map((g) => (
-                  <tr key={g.gestureId}>
-                    <td>{g.name}</td>
-                    <td>{g.totalTrained}</td>
-                    <td>{g.modeTested}</td>
-                    <td>{g.modeAccuracy}%</td>
-                    <td>{g.avgConfidence}%</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="card admin-table-card">
-            <h3 className="admin-table-title">Gesture Access</h3>
-            <p style={{ color: '#999', fontSize: '0.82rem', marginBottom: '12px' }}>
-              Gestures auto-unlock when all unlocked gestures reach {'>'}70% accuracy with {'>'}5 test trials each. You can also toggle manually.
-            </p>
-            <table className="admin-gesture-table">
-              <thead>
-                <tr>
-                  <th>Gesture</th>
-                  <th>Accuracy</th>
-                  <th>Trained</th>
-                  <th>Tested</th>
                   <th style={{ textAlign: 'center' }}>Status</th>
                 </tr>
               </thead>
@@ -463,9 +438,10 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
                 {gestureUnlocks.map((g) => (
                   <tr key={g.gestureId}>
                     <td>{g.name}</td>
-                    <td>{g.accuracy}%</td>
                     <td>{g.totalTrained}</td>
                     <td>{g.totalTested}</td>
+                    <td>{g.accuracy}%</td>
+                    <td>{g.avgConfidence ?? '—'}%</td>
                     <td style={{ textAlign: 'center' }}>
                       {selectedMode === 'simulated' ? (
                         <span className="admin-status-active">Unlocked</span>
@@ -494,256 +470,182 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
             </table>
           </div>
 
-          <ProgressPage
-            key={`${selectedUser.id}-${progressRefreshToken}`}
-            user={selectedUser}
-            isActive={activePage === 'dashboard'}
-          />
-        </>
-      )}
-
-      {selectedUser && activePage === 'simulation' && (
-        <>
-          <div className="admin-summary-row">
-            <div className="card admin-stat-card">
-              <div className="admin-stat-value">{progress?.simulatedAccuracy ?? 0}%</div>
-              <div className="admin-stat-label">Simulation Accuracy</div>
-            </div>
-            <div className="card admin-stat-card">
-              <div className="admin-stat-value">{progress?.simulatedTested ?? 0}</div>
-              <div className="admin-stat-label">Simulation Attempts</div>
-            </div>
-            <div className="card admin-stat-card">
-              <div className="admin-stat-value">{trainingFiles.length}</div>
-              <div className="admin-stat-label">Simulation Datasets</div>
-            </div>
-            <div className="card admin-stat-card">
-              <div className="admin-stat-value">{models.length}</div>
-              <div className="admin-stat-label">Saved Models</div>
-            </div>
-          </div>
-
-          <div className="admin-simulation-header">
-            <div>
-              <h3 className="admin-table-title">Simulation Assets</h3>
-              <p className="admin-simulation-subtitle">
-                This section contains the dataset upload, model training, and saved simulation assets from your recent updates.
-              </p>
-            </div>
-            <button className="training-refresh-btn" onClick={() => loadAdminData({ showLoading: true, refreshAssetsOnly: true })} disabled={refreshingAssets}>
-              {refreshingAssets ? 'Refreshing...' : 'Refresh'}
-            </button>
-          </div>
-
-          {assetMessage && <div className="training-inline-message">{assetMessage}</div>}
-
-          <div className="admin-simulation-grid">
-            <div className="card training-assets-card">
-              <div className="training-card-header">
-                <div>
-                  <h3 className="training-card-title">Datasets</h3>
-                  <p className="training-card-subtitle">Upload `.mat` files, edit gesture order, and choose which datasets to train into a model.</p>
+          {/* Training files */}
+          <div className="card admin-table-card">
+            <h3 className="admin-table-title">Data Files</h3>
+            {trainingFiles.length === 0 ? (
+              <p style={{ color: '#999', fontSize: '0.9rem' }}>No training files found.</p>
+            ) : (
+              <>
+                <table className="admin-gesture-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: '40px', textAlign: 'center' }}></th>
+                      <th>File Name</th>
+                      <th>Source</th>
+                      <th>Date</th>
+                      <th>Time</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {trainingFiles.slice(filePage * FILES_PER_PAGE, (filePage + 1) * FILES_PER_PAGE).map((f) => {
+                      const isMat = f.fileName.endsWith('.mat') || f.fileName.endsWith('.npz');
+                      return (
+                        <tr
+                          key={f.id}
+                          className={`${selectedFileIds.includes(f.id) ? 'admin-row-active' : ''}${isMat ? ' admin-row-clickable' : ''}`}
+                          onClick={() => isMat && toggleFileSelection(f.id)}
+                        >
+                          <td style={{ textAlign: 'center' }}>
+                            {isMat ? (
+                              <input
+                                type="checkbox"
+                                className="admin-checkbox"
+                                checked={selectedFileIds.includes(f.id)}
+                                onChange={() => toggleFileSelection(f.id)}
+                                onClick={(e) => e.stopPropagation()}
+                              />
+                            ) : null}
+                          </td>
+                          <td>{f.fileName}</td>
+                          <td>{f.fileName.startsWith('testing_') ? 'Testing' : 'Training'}</td>
+                          <td>{f.createdAt ? new Date(f.createdAt + 'Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
+                          <td>{f.createdAt ? new Date(f.createdAt + 'Z').toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {trainingFiles.length > FILES_PER_PAGE && (
+                  <div style={{ marginTop: '10px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '12px', fontSize: '0.85rem' }}>
+                    <button
+                      className="admin-set-active-btn"
+                      style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                      disabled={filePage === 0}
+                      onClick={() => setFilePage((p) => p - 1)}
+                    >
+                      ← Prev
+                    </button>
+                    <span style={{ color: '#666' }}>
+                      {filePage + 1} / {Math.ceil(trainingFiles.length / FILES_PER_PAGE)}
+                    </span>
+                    <button
+                      className="admin-set-active-btn"
+                      style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                      disabled={(filePage + 1) * FILES_PER_PAGE >= trainingFiles.length}
+                      onClick={() => setFilePage((p) => p + 1)}
+                    >
+                      Next →
+                    </button>
+                  </div>
+                )}
+                <div style={{ marginTop: '12px', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                  <button
+                    className="admin-set-active-btn"
+                    disabled={selectedFileIds.length === 0 || training}
+                    onClick={handleTrainModel}
+                  >
+                    {training ? 'Training…' : 'Train'}
+                  </button>
                 </div>
-              </div>
+                {trainLogs.length > 0 && (
+                  <div className="admin-train-logs">
+                    {trainLogs.map((line, i) => (
+                      <div key={i}>{line}</div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
 
-              <div className="training-upload-panel">
-                <input
-                  id="admin-simulation-upload"
-                  type="file"
-                  accept=".mat"
-                  onChange={(e) => setSelectedUploadFile(e.target.files?.[0] || null)}
-                />
-                <textarea
-                  className="training-textarea"
-                  value={uploadGestureOrder}
-                  onChange={(e) => setUploadGestureOrder(e.target.value)}
-                  rows={3}
-                  placeholder="Gesture order, comma-separated"
-                />
-                <button
-                  className="btn admin-set-active-btn"
-                  onClick={handleUpload}
-                  disabled={!selectedUploadFile || uploading}
-                >
-                  {uploading ? 'Uploading...' : 'Upload Dataset'}
-                </button>
-              </div>
-
-              {trainingFiles.length === 0 ? (
-                <p className="training-empty-text">No simulation datasets yet.</p>
-              ) : (
-                <div className="training-list training-dataset-list">
-                  {trainingFiles.map((file) => {
-                    const selected = selectedFileIds.includes(file.id);
-                    const showingOrder = Boolean(showFileOrders[file.id]);
-                    return (
-                      <div key={file.id} className={`training-list-item ${selected ? 'selected' : ''}`}>
-                        <label className={`training-dataset-main ${file.canTrain ? '' : 'disabled'}`}>
+          {/* Available models */}
+          <div className="card admin-table-card">
+            <h3 className="admin-table-title">Models</h3>
+            {models.length === 0 ? (
+              <p style={{ color: '#999', fontSize: '0.9rem' }}>No models found.</p>
+            ) : (
+              <table className="admin-gesture-table">
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Version</th>
+                    <th>Accuracy</th>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th style={{ textAlign: 'center' }}>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {models.map((m) => (
+                    <React.Fragment key={m.id}>
+                      <tr
+                        className={`${selectedModelIds.includes(m.id) ? 'admin-row-active' : ''} admin-row-clickable`}
+                        style={{ cursor: 'pointer' }}
+                        onClick={() => setExpandedModelId(expandedModelId === m.id ? null : m.id)}
+                      >
+                        <td style={{ textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
                           <input
                             type="checkbox"
-                            checked={selected}
-                            disabled={!file.canTrain}
-                            onChange={() => toggleFileSelection(file.id)}
+                            className="admin-checkbox"
+                            checked={selectedModelIds.includes(m.id)}
+                            onChange={() => toggleModelSelection(m.id)}
                           />
-                          <div>
-                            <div className="training-file-header">
-                              <div className="training-file-name-row">
-                                <input
-                                  className="training-text-input training-file-name-input"
-                                  type="text"
-                                  value={editingFileNames[file.id] || ''}
-                                  onChange={(e) => setEditingFileNames((prev) => ({ ...prev, [file.id]: e.target.value }))}
-                                />
-                                <button
-                                  type="button"
-                                  className="btn admin-status-inactive training-file-save-btn"
-                                  onClick={() => handleRenameFile(file.id)}
-                                >
-                                  Save
-                                </button>
-                              </div>
-                              <div className="training-file-actions">
-                                <button
-                                  type="button"
-                                  className="btn admin-status-inactive training-show-order-btn"
-                                  onClick={() => toggleShowFileOrder(file.id)}
-                                >
-                                  {showingOrder ? 'Hide Order' : 'Show Order'}
-                                </button>
-                                <button
-                                  type="button"
-                                  className="training-danger-btn training-file-delete-btn"
-                                  onClick={() => handleDeleteFile(file.id, file.fileName)}
-                                >
-                                  Delete
-                                </button>
-                              </div>
+                        </td>
+                        <td>
+                          {m.name || `v${m.versionNumber}`}
+                        </td>
+                        <td>{m.accuracy != null ? `${m.accuracy}%` : '—'}</td>
+                        <td>{m.trainingDate ? new Date(m.trainingDate + 'Z').toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '—'}</td>
+                        <td>{m.trainingDate ? new Date(m.trainingDate + 'Z').toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '—'}</td>
+                        <td style={{ textAlign: 'center' }} onClick={(e) => e.stopPropagation()}>
+                          {m.isActive ? (
+                            <span className="admin-status-active">Active</span>
+                          ) : (
+                            <button
+                              className="admin-status-inactive"
+                              onClick={() => handleSetActiveModel(m.id)}
+                            >
+                              Inactive
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                      {expandedModelId === m.id && (
+                        <tr>
+                          <td colSpan={6} style={{ padding: '10px 20px 14px', background: 'transparent', borderTop: 'none' }}>
+                            <div style={{ fontSize: '0.72rem', color: '#666', fontFamily: 'monospace', letterSpacing: 0.5, marginBottom: 6 }}>
+                              TRAINED ON ({m.trainingFiles?.length || 0} files)
                             </div>
-                            <div className="training-item-meta">
-                              {file.fileType?.toUpperCase() || 'FILE'} · {file.createdAt ? new Date(file.createdAt).toLocaleString() : 'Unknown date'}
-                            </div>
-                            {showingOrder && (
-                              <>
-                                <div className="training-item-meta">Edit gesture order:</div>
-                                <div className="training-model-row">
-                                  <textarea
-                                    className="training-textarea training-order-textarea"
-                                    value={editingFileOrders[file.id] || ''}
-                                    onChange={(e) => setEditingFileOrders((prev) => ({ ...prev, [file.id]: e.target.value }))}
-                                    rows={3}
-                                    placeholder="Gesture order, comma-separated"
-                                  />
-                                  <button
-                                    type="button"
-                                    className="btn admin-status-inactive"
-                                    onClick={() => handleSaveGestureOrder(file.id)}
-                                  >
-                                    Save Order
-                                  </button>
+                            {m.trainingFiles && m.trainingFiles.length > 0
+                              ? <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                                  {m.trainingFiles.map((name, i) => (
+                                    <div key={i} style={{ fontSize: '0.8rem', color: '#2d2d4e', fontFamily: 'monospace', padding: '3px 8px', background: 'rgba(91,106,191,0.08)', borderRadius: 4, border: '1px solid rgba(91,106,191,0.18)' }}>
+                                      {name}
+                                    </div>
+                                  ))}
                                 </div>
-                              </>
-                            )}
-                            {!file.canTrain && (
-                              <div className="training-item-meta">
-                                This dataset needs a valid gesture order before it can be used for model training.
-                              </div>
-                            )}
-                          </div>
-                        </label>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-
-              <div className="training-model-builder">
-                <input
-                  className="training-text-input"
-                  type="text"
-                  value={modelName}
-                  onChange={(e) => setModelName(e.target.value)}
-                  placeholder="New model name"
-                />
+                              : <div style={{ fontSize: '0.8rem', color: '#555', fontStyle: 'italic' }}>No file info available</div>
+                            }
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            {selectedModelIds.length > 0 && (
+              <div style={{ marginTop: '12px' }}>
                 <button
-                  className="btn admin-set-active-btn"
-                  disabled={selectedFileIds.length === 0 || trainingModel}
-                  onClick={handleTrainModel}
+                  className="admin-set-active-btn"
+                  style={{ background: '#c0392b' }}
+                  onClick={handleDeleteModels}
                 >
-                  {trainingModel ? 'Training...' : `Train Model (${selectedFileIds.length})`}
+                  Delete
                 </button>
               </div>
-              {trainableFiles.length === 0 && (
-                <div className="training-empty-text">Upload at least one `.mat` dataset with gesture order to train a model.</div>
-              )}
-              {trainLogs.length > 0 && (
-                <div className="admin-train-logs">
-                  {trainLogs.map((line, index) => (
-                    <div key={index}>{line}</div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <div className="card training-assets-card">
-              <div className="training-card-header">
-                <div>
-                  <h3 className="training-card-title">Models</h3>
-                  <p className="training-card-subtitle">Rename, activate, or delete the saved models for this user's simulation and testing flow.</p>
-                </div>
-              </div>
-
-              {activeModel && (
-                <div className="admin-inline-callout">
-                  Active model: <strong>{activeModel.modelName}</strong>
-                </div>
-              )}
-
-              {models.length === 0 ? (
-                <p className="training-empty-text">No models trained yet.</p>
-              ) : (
-                <div className="training-list">
-                  {models.map((model) => (
-                    <div key={model.id} className="training-model-item">
-                      <div className="training-model-row">
-                        <input
-                          className="training-text-input"
-                          type="text"
-                          value={editingNames[model.id] || ''}
-                          onChange={(e) => setEditingNames((prev) => ({ ...prev, [model.id]: e.target.value }))}
-                        />
-                        <button
-                          className="btn admin-status-inactive"
-                          onClick={() => handleRenameModel(model.id)}
-                        >
-                          Save Name
-                        </button>
-                      </div>
-                      <div className="training-item-meta">
-                        v{model.versionNumber} · {model.accuracy != null ? `${model.accuracy}%` : 'No accuracy'} · {model.trainingDate ? new Date(model.trainingDate).toLocaleString() : 'Unknown date'}
-                      </div>
-                      <div className="training-model-footer">
-                        {model.isActive ? (
-                          <span className="admin-status-active">Active</span>
-                        ) : (
-                          <button
-                            className="btn admin-status-inactive"
-                            onClick={() => handleSetActiveModel(model.id)}
-                          >
-                            Set Active
-                          </button>
-                        )}
-                        <button
-                          className="training-danger-btn"
-                          onClick={() => handleDeleteModel(model.id, model.modelName)}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            )}
           </div>
 
           <div className="card admin-table-card">
@@ -762,6 +664,38 @@ function AdminDashboard({ user, activePage = 'dashboard', socket, connected, liv
             onResultsSaved={handleTestingSaved}
           />
         </>
+      )}
+
+      {/* Name model popup */}
+      {namePopup && (
+        <div className="live-popup-overlay" onClick={() => setNamePopup(null)}>
+          <div className="card live-popup" onClick={(e) => e.stopPropagation()}>
+            <h3 className="live-popup-title" style={{ fontSize: '1.4rem' }}>Training Complete!</h3>
+            <p className="live-popup-subtitle" style={{ fontSize: '1.05rem' }}>
+              What would you like to name this model?
+            </p>
+            <div className="live-popup-fields" style={{ display: 'flex', justifyContent: 'center' }}>
+              <input
+                type="text"
+                className="live-popup-input"
+                placeholder={`v${namePopup.versionNumber}`}
+                value={popupName}
+                onChange={(e) => setPopupName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSaveModelName()}
+                autoFocus
+                style={{ fontSize: '1rem', textAlign: 'center', width: '70%' }}
+              />
+            </div>
+            <div className="live-popup-actions">
+              <button className="btn live-popup-btn-cancel" onClick={() => setNamePopup(null)}>
+                Skip
+              </button>
+              <button className="btn live-popup-btn-confirm" onClick={handleSaveModelName}>
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

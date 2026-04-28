@@ -1,23 +1,14 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { API, GESTURE_IMAGES_PNG, T_ON_DEFAULT, T_OFF_DEFAULT } from '../constants';
+import EMGStrip from './EMGStrip';
 
-const API = 'http://localhost:5050';
-
-const GESTURE_IMAGES = {
-  Open: '/gestures/open.jpg',
-  Close: '/gestures/close.jpg',
-  'Thumbs Up': '/gestures/thumbs_up.jpg',
-  Peace: '/gestures/peace.jpg',
-  'Index Point': '/gestures/index_point.jpg',
-  Four: '/gestures/four.jpg',
-  Okay: '/gestures/okay.jpg',
-  Spiderman: '/gestures/spiderman.jpg',
-};
+const GESTURE_IMAGES = GESTURE_IMAGES_PNG;
 
 const SESSION_LENGTHS = [
   { label: '2 min', value: 2 },
-  { label: '5 min', value: 5 },
-  { label: '10 min', value: 10 },
-  { label: '15 min', value: 15 },
+  { label: '4 min', value: 4 },
+  { label: '6 min', value: 6 },
+  { label: '8 min', value: 8 },
 ];
 
 function TrainingPage({ socket, connected, user, mode, liveOpts }) {
@@ -30,6 +21,9 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
   const [sensorStatus, setSensorStatus] = useState(null);
   const [logs, setLogs] = useState([]);
   const logBottomRef = useRef(null);
+  const [actHistory, setActHistory] = useState([]);
+  const [tOnLive, setTOnLive] = useState(T_ON_DEFAULT);
+  const [tOffLive, setTOffLive] = useState(T_OFF_DEFAULT);
 
   useEffect(() => {
     if (!user?.id) return;
@@ -44,38 +38,65 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
 
     const onPhase = (data) => {
       setPhase(data);
-      setCountdown(data.countdown);
+      setCountdown(data.countdown);  // seed initial value; local timer takes over
     };
-    const onCountdown = (data) => setCountdown(data.countdown);
     const onLog = (data) => {
       setLogs((prev) => [...prev, data.text].slice(-80));
     };
     const onDone = () => {
-      setCollecting(false);
+      setPhase({ phase: 'done', gesture: 'Training Complete!', countdown: 0, index: 0, total: 0 });
+      setCountdown(0);
       setPaused(false);
-      setPhase(null);
+      setTimeout(() => {
+        setCollecting(false);
+        setPhase(null);
+      }, 3000);
     };
     const onSensor = (data) => setSensorStatus(data);
     const onPaused = (data) => setPaused(data.paused);
+    const onState = (data) => {
+      const act = typeof data.act === 'number' ? data.act : 0;
+      setActHistory(prev => {
+        const n = [...prev, act];
+        return n.length > 120 ? n.slice(-120) : n;
+      });
+    };
+    const onSignal = (data) => {
+      if (typeof data.t_on  === 'number') setTOnLive(data.t_on);
+      if (typeof data.t_off === 'number') setTOffLive(data.t_off);
+    };
 
     socket.on('train_phase', onPhase);
-    socket.on('train_countdown', onCountdown);
     socket.on('train_log', onLog);
     socket.on('train_done', onDone);
     socket.on('train_sensor', onSensor);
     socket.on('train_paused', onPaused);
+    socket.on('train_state', onState);
+    socket.on('train_signal', onSignal);
 
     return () => {
       socket.off('train_phase', onPhase);
-      socket.off('train_countdown', onCountdown);
       socket.off('train_log', onLog);
       socket.off('train_done', onDone);
       socket.off('train_sensor', onSensor);
       socket.off('train_paused', onPaused);
+      socket.off('train_state', onState);
+      socket.off('train_signal', onSignal);
+      // Stop backend training if user navigates away mid-session
       socket.emit('train_stop');
     };
   }, [socket]);
 
+  // Local 1-second countdown timer — independent of backend sample rate
+  useEffect(() => {
+    if (!collecting || paused || countdown <= 1) return;
+    const id = setInterval(() => {
+      setCountdown(prev => Math.max(1, prev - 1));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [collecting, paused, countdown]);
+
+  // Auto-scroll log
   useEffect(() => {
     if (logBottomRef.current) {
       logBottomRef.current.scrollIntoView({ behavior: 'smooth' });
@@ -96,6 +117,7 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
     setPhase(null);
     setCountdown(0);
     setSensorStatus(null);
+    setActHistory([]);
   };
 
   const handleStop = () => {
@@ -192,7 +214,9 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
                 </div>
               )}
 
-              <div className="training-countdown">{countdown}</div>
+              {countdown > 0 && (
+                <div className="training-countdown">{countdown}</div>
+              )}
 
               {!isGesture && phase?.nextGesture && (
                 <div className="training-next">
@@ -208,6 +232,14 @@ function TrainingPage({ socket, connected, user, mode, liveOpts }) {
         </div>
       )}
 
+      {/* ── EMG signal strip ── */}
+      {(collecting || phase) && (
+        <div className="card" style={{ padding: 16, marginTop: 12 }}>
+          <EMGStrip actHistory={actHistory} />
+        </div>
+      )}
+
+      {/* Session controls (during session) */}
       {(collecting || phase) && (
         <div className="train-session-controls">
           <button

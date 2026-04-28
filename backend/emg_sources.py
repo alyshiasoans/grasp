@@ -2,332 +2,287 @@
 EMG data-source abstraction.
 
 Two sources:
-  • SimulatedSource  – replays a .mat file in real time (existing behaviour)
-  • LiveSource       – streams from Quattrocento via direct TCP (OTB protocol)
+  • SimulatedSource  – replays a .mat file in real time
+  • LiveSource       – streams from Sessantaquattro+ via WiFi TCP
 
-Both expose an iterator that yields one sample (1×n_channels numpy array) at a
-time, at the correct sampling rate.
+Both expose a stream() iterator that yields one sample (1-D numpy array)
+at a time at the correct sampling rate, plus stop()/pause()/resume().
 """
 
+import os
 import socket
+import struct
 import time
+import glob
+import random
 import numpy as np
 from scipy.io import loadmat
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Simulated (mat-file playback)
-# ─────────────────────────────────────────────────────────────────────────────
-class SimulatedSource:
-    """Replay a .mat file sample-by-sample at real-time speed."""
-
-    def __init__(self, mat_path, playback_speed=1.0):
-        m = loadmat(mat_path)
-        self.sig = np.array(m["Data"], dtype=float)[:, :64]
-        self.Fs = float(np.squeeze(m["SamplingFrequency"]))
-        self.n_channels = self.sig.shape[1]
-        self.playback_speed = playback_speed
-        self._stop = False
-        self._paused = False
-
-    def stop(self):
-        self._stop = True
-
-    def pause(self):
-        self._paused = True
-
-    def resume(self):
-        self._paused = False
-
-    def stream(self):
-        """Yield (sample_array,) one at a time at real-time pace."""
-        dt = 1.0 / (self.Fs * self.playback_speed)
-        t_start = time.perf_counter()
-        for i, row in enumerate(self.sig):
-            if self._stop:
-                break
-            # Block while paused, adjusting t_start so timing stays correct
-            while self._paused and not self._stop:
-                time.sleep(0.05)
-                t_start = time.perf_counter() - i * dt
-            if self._stop:
-                break
-            yield row
-            target = t_start + (i + 1) * dt
-            rem = target - time.perf_counter()
-            if rem > 0:
-                time.sleep(rem)
-
-    @property
-    def rest_data(self):
-        """First 2 seconds of data for rest-level calibration."""
-        n = int(self.Fs * 2)
-        return self.sig[:n, :]
+from config import (
+    S64_FSAMP, S64_NCH, S64_MODE, S64_HRES, S64_HPF, S64_EXTEN,
+    S64_TRIG, S64_REC, S64_GO, TRAINING_DIR,
+)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Live – Sessantaquattro+ via WiFi TCP
-# ─────────────────────────────────────────────────────────────────────────────
-# The Sessantaquattro+ connects to YOUR computer (your app is the server).
-# 1. Connect your PC to the Sessantaquattro+ WiFi network
-# 2. Start the app — it listens on 0.0.0.0:45454
-# 3. The device connects and you send a 2-byte config command
-# 4. Device streams big-endian int16 data
+# ── Sessantaquattro+ helpers ──────────────────────────────────────────────────
 
-DEFAULT_SQ_HOST = "0.0.0.0"          # Listen on all interfaces
-DEFAULT_SQ_PORT = 45454              # Sessantaquattro+ default port
-DEFAULT_CALIBRATION_S = 2.0          # seconds of rest for baseline
-
-CONVERSION_FACTOR = 0.000286         # raw int16 → mV
-
-# Sessantaquattro+ channel/frequency lookup tables
-_NCH_MAP_STANDARD = {0: 16, 1: 24, 2: 40, 3: 72}
-_NCH_MAP_MODE1    = {0: 12, 1: 16, 2: 24, 3: 40}
-_FSAMP_STANDARD   = {0: 500, 1: 1000, 2: 2000, 3: 4000}
-_FSAMP_MODE3      = {0: 2000, 1: 4000, 2: 8000, 3: 16000}
+def s64_make_command(fsamp=S64_FSAMP, nch=S64_NCH, mode=S64_MODE,
+                     hres=S64_HRES, hpf=S64_HPF, exten=S64_EXTEN,
+                     trig=S64_TRIG, rec=S64_REC, go=S64_GO):
+    return (go | (rec << 1) | (trig << 2) | (exten << 4) |
+            (hpf << 6) | (hres << 7) | (mode << 8) | (nch << 11) | (fsamp << 13))
 
 
-def _sq_num_channels(nch, mode):
-    if mode == 1:
-        return _NCH_MAP_MODE1.get(nch, 72)
-    return _NCH_MAP_STANDARD.get(nch, 72)
+def s64_num_channels(nch=S64_NCH, mode=S64_MODE):
+    tbl = {0: (16, 12), 1: (24, 16), 2: (40, 24), 3: (72, 40)}
+    standard, hp = tbl.get(nch, (72, 40))
+    return hp if mode == 1 else standard
 
 
-def _sq_sample_freq(fsamp, mode):
+def s64_sampling_freq(fsamp=S64_FSAMP, mode=S64_MODE):
     if mode == 3:
-        return _FSAMP_MODE3.get(fsamp, 2000)
-    return _FSAMP_STANDARD.get(fsamp, 2000)
+        return {0: 2000, 1: 4000, 2: 8000, 3: 16000}.get(fsamp, 2000)
+    return {0: 500, 1: 1000, 2: 2000, 3: 4000}.get(fsamp, 2000)
 
 
-def _sq_build_command(fsamp=2, nch=3, mode=0, hres=0, hpf=0,
-                      exten=0, trig=0, rec=0, go=1):
-    """Build the 2-byte big-endian command for Sessantaquattro+."""
-    cmd = (go
-           + (rec   << 1)
-           + (trig  << 2)
-           + (exten << 4)
-           + (hpf   << 6)
-           + (hres  << 7)
-           + (mode  << 8)
-           + (nch   << 11)
-           + (fsamp << 13))
-    return cmd.to_bytes(2, byteorder='big', signed=True)
+def recvall(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            return None
+        buf.extend(chunk)
+    return bytes(buf)
 
 
-class LiveSource:
+# ── Simulated source ──────────────────────────────────────────────────────────
+
+def _find_training_npz(user=None):
+    """Return list of continuous-format .npz training files.
+
+    Prefers the given user's folder; falls back to all training data.
     """
-    Stream EMG from the Sessantaquattro+ via WiFi TCP.
+    def _scan(pattern):
+        results = []
+        for path in glob.glob(pattern, recursive=True):
+            try:
+                d = np.load(path, allow_pickle=True)
+                if "Data" in d and "SamplingFrequency" in d:
+                    # Skip files with tiny values (saved from filtered/normalized data)
+                    sig = np.array(d["Data"], dtype=float)
+                    if np.mean(np.abs(sig[:min(2000, len(sig))])) < 1.0:
+                        continue
+                    results.append(path)
+            except Exception:
+                pass
+        return results
 
-    The Sessantaquattro+ expects YOUR computer to be a TCP server.
-    Connection flow:
-      1. Connect your PC to the Sessantaquattro+ WiFi network
-      2. This code opens a TCP server on 0.0.0.0:45454
-      3. The device connects (appears as an incoming connection)
-      4. We send a 2-byte config/start command
-      5. The device streams big-endian int16 data in chunks of
-         (frequency // 16) samples × n_total_channels
+    # Try user-specific folder first
+    if user:
+        user_files = _scan(os.path.join(TRAINING_DIR, user, "training_*.npz"))
+        if user_files:
+            return user_files
+
+    # Fallback: all training data everywhere
+    all_files = _scan(os.path.join(TRAINING_DIR, "**", "training_*.npz"))
+    return all_files
+
+
+def _load_npz_data(path):
+    """Load a continuous .npz file → (sig, Fs)."""
+    d = np.load(path, allow_pickle=True)
+    sig = np.array(d["Data"], dtype=float)
+    if sig.shape[1] > 64:
+        sig = sig[:, :64]
+    Fs = float(np.squeeze(d["SamplingFrequency"]))
+    return sig, Fs
+
+
+class SimulatedSource:
+    """
+    Replays EMG data for simulation.
+
+    Scans training_data/ for continuous .npz files and plays them in random
+    order, looping indefinitely.  Falls back to a .mat file if no .npz are
+    available.
     """
 
-    def __init__(
-        self,
-        host=DEFAULT_SQ_HOST,
-        port=DEFAULT_SQ_PORT,
-        fsamp=2,                    # 0=500, 1=1000, 2=2000, 3=4000
-        nch=3,                      # 0→16ch, 1→24ch, 2→40ch, 3→72ch (standard)
-        mode=0,                     # 0=standard, 1=..., 3=accel
-        hres=0,                     # 0=16-bit, 1=24-bit
-        emg_channels=64,            # how many EMG channels to extract
-        calibration_s=DEFAULT_CALIBRATION_S,
-        on_log=None,
-    ):
-        self.host = host
-        self.port = int(port)
-        self.fsamp = fsamp
-        self.nch = nch
-        self.mode = mode
-        self.hres = hres
-        self.Fs = _sq_sample_freq(fsamp, mode)
-        self.n_total_channels = _sq_num_channels(nch, mode)
-        self.n_channels = emg_channels
-        self.bytes_per_sample = 3 if hres == 1 else 2
-        self.calibration_s = calibration_s
+    def __init__(self, mat_path, speed=1.0, user=None):
+        self.speed = speed
+        self.n_channels = 64
         self._stop = False
-        self._paused = False
-        self._server_sock = None
-        self._client_sock = None
-        self._on_log = on_log or (lambda msg: None)
+        self._user = user
 
-        # Rest calibration data
-        self._rest_samples = []
-        self._rest_data = None
+        # Discover .npz training files
+        self._npz_files = _find_training_npz(user)
 
-    def stop(self):
-        self._stop = True
-        self._paused = False
-        # Send stop command
-        if self._client_sock:
-            try:
-                stop_cmd = _sq_build_command(
-                    fsamp=self.fsamp, nch=self.nch, mode=self.mode,
-                    hres=self.hres, go=0,
-                )
-                self._client_sock.send(stop_cmd)
-            except Exception:
-                pass
-            try:
-                self._client_sock.close()
-            except Exception:
-                pass
-            self._client_sock = None
-        if self._server_sock:
-            try:
-                self._server_sock.close()
-            except Exception:
-                pass
-            self._server_sock = None
-
-    def pause(self):
-        self._paused = True
-
-    def resume(self):
-        self._paused = False
-
-    def _recv_exact(self, n):
-        """Receive exactly n bytes from the client socket."""
-        buf = bytearray()
-        while len(buf) < n and not self._stop:
-            chunk = self._client_sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("Sessantaquattro+ connection closed")
-            buf.extend(chunk)
-        return bytes(buf)
+        if self._npz_files:
+            # Peek at first file for Fs
+            _, self.Fs = _load_npz_data(self._npz_files[0])
+            self.sig = None  # loaded lazily per-file
+            self._source_label = f"{len(self._npz_files)} training files"
+        else:
+            # Fallback: original .mat
+            m = loadmat(mat_path)
+            self.sig = np.array(m['Data'], dtype=float)[:, :64]
+            self.Fs = float(np.squeeze(m['SamplingFrequency']))
+            self._npz_files = []
+            self._source_label = os.path.basename(mat_path)
 
     def stream(self):
-        """
-        Start a TCP server, wait for the Sessantaquattro+ to connect,
-        send the start command, and yield one sample at a time.
+        dt = 1.0 / (self.Fs * self.speed)
 
-        Each yielded sample is a 1-D float64 array of length `emg_channels`
-        (in mV after conversion).
-        """
-        self._stop = False
-        self._rest_samples = []
-        self._rest_data = None
-        cal_n = int(self.calibration_s * self.Fs)
-
-        # ── Start TCP server ────────────────────────────────────────────────
-        self._on_log(f"Starting TCP server on {self.host}:{self.port}…")
-        self._on_log("Waiting for Sessantaquattro+ to connect…")
-
-        self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_sock.bind((self.host, self.port))
-        self._server_sock.listen(1)
-
-        # Poll accept() with short timeouts so we can honour _stop quickly
-        self._client_sock = None
-        deadline = time.time() + 60.0
-        while not self._stop:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                self._on_log("ERROR: Sessantaquattro+ did not connect within 60s")
-                self._server_sock.close()
-                self._server_sock = None
-                return
-            self._server_sock.settimeout(min(remaining, 1.0))
-            try:
-                self._client_sock, addr = self._server_sock.accept()
-                break
-            except socket.timeout:
-                continue
-            except OSError:
-                # Socket was closed by stop() from another thread
-                self._server_sock = None
-                return
-
-        if self._stop or self._client_sock is None:
-            if self._server_sock:
-                self._server_sock.close()
-                self._server_sock = None
+        if not self._npz_files:
+            # Fallback: replay .mat once
+            for row in self.sig:
+                if self._stop:
+                    return
+                t0 = time.perf_counter()
+                yield row
+                rem = dt - (time.perf_counter() - t0)
+                if rem > 0:
+                    time.sleep(rem)
             return
 
-        self._on_log(f"Sessantaquattro+ connected from {addr}")
-
-        # ── Send start command ──────────────────────────────────────────────
-        start_cmd = _sq_build_command(
-            fsamp=self.fsamp, nch=self.nch, mode=self.mode,
-            hres=self.hres, go=1,
-        )
-        self._client_sock.send(start_cmd)
-        self._on_log(
-            f"Acquisition started — {self.n_total_channels}ch "
-            f"@ {self.Fs} Hz ({self.bytes_per_sample * 8}-bit)"
-        )
-
-        # ── Receive loop ────────────────────────────────────────────────────
-        samples_per_chunk = self.Fs // 16
-        bytes_per_chunk = self.n_total_channels * self.bytes_per_sample * samples_per_chunk
-        sample_idx = 0
-        dtype_str = '>h'  # big-endian int16
-
-        try:
-            while not self._stop:
-                raw_bytes = self._recv_exact(bytes_per_chunk)
+        # Shuffle and loop .npz files indefinitely
+        files = list(self._npz_files)
+        while not self._stop:
+            random.shuffle(files)
+            for path in files:
                 if self._stop:
+                    return
+                try:
+                    sig, Fs = _load_npz_data(path)
+                except Exception:
+                    continue
+                dt = 1.0 / (Fs * self.speed)
+                for row in sig:
+                    if self._stop:
+                        return
+                    t0 = time.perf_counter()
+                    yield row
+                    rem = dt - (time.perf_counter() - t0)
+                    if rem > 0:
+                        time.sleep(rem)
+
+    def stop(self):
+        self._stop = True
+
+    def pause(self):
+        pass
+
+    def resume(self):
+        pass
+
+
+# ── Live source ───────────────────────────────────────────────────────────────
+
+class LiveSource:
+    def __init__(self, host="0.0.0.0", port=45454,
+                 fsamp=S64_FSAMP, nch=S64_NCH, mode=S64_MODE,
+                 emg_channels=64, on_log=None):
+        self.host          = host
+        self.port          = port
+        self.fsamp_bits    = fsamp
+        self.nch_bits      = nch
+        self.mode_bits     = mode
+        self.emg_channels  = emg_channels
+        self.on_log        = on_log or (lambda msg: None)
+
+        self.n_channels    = s64_num_channels(nch, mode)
+        self.Fs            = float(s64_sampling_freq(fsamp, mode))
+
+        self._server_sock  = None
+        self._client_sock  = None
+        self._stop         = False
+
+    def _connect(self):
+        cmd = s64_make_command(self.fsamp_bits, self.nch_bits, self.mode_bits)
+        self.on_log(f"[live] listening on {self.host}:{self.port} …")
+        self.on_log(f"[live] {self.n_channels} ch @ {self.Fs:.0f} Hz  cmd={format(cmd, '016b')}")
+
+        max_retries = 3
+        accept_timeout = 10  # seconds per attempt
+
+        for attempt in range(1, max_retries + 1):
+            if self._stop:
+                raise ConnectionAbortedError("stopped by user")
+
+            # Close any leftover sockets from a previous attempt
+            if self._server_sock:
+                try: self._server_sock.close()
+                except Exception: pass
+                self._server_sock = None
+                time.sleep(0.3)  # let OS release the port
+
+            try:
+                self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                self._server_sock.bind((self.host, self.port))
+                self._server_sock.listen(1)
+                self._server_sock.settimeout(accept_timeout)
+
+                self.on_log(f"[live] waiting for amplifier (attempt {attempt}/{max_retries}, "
+                            f"{accept_timeout}s timeout) …")
+                self._client_sock, addr = self._server_sock.accept()
+                self.on_log(f"[live] amplifier connected from {addr}")
+
+                self._client_sock.send(cmd.to_bytes(2, byteorder='big', signed=True))
+                self.on_log("[live] command sent — streaming started")
+                return  # success
+
+            except socket.timeout:
+                self.on_log(f"[live] attempt {attempt}/{max_retries} timed out")
+            except OSError as e:
+                self.on_log(f"[live] attempt {attempt}/{max_retries} error: {e}")
+                time.sleep(1)  # extra wait for port release on bind errors
+
+        raise ConnectionError(f"amplifier did not connect after {max_retries} attempts")
+
+    def stream(self):
+        try:
+            self._connect()
+        except (ConnectionError, ConnectionAbortedError, OSError) as e:
+            self.on_log(f"[live] connection failed: {e}")
+            return
+        samples_per_packet = int(self.Fs) // 16
+        packet_bytes = self.n_channels * 2 * samples_per_packet
+        self.on_log(f"[live] packet size = {packet_bytes} bytes "
+                    f"({self.n_channels} ch × 2 B × {samples_per_packet} samp)")
+
+        while not self._stop:
+            try:
+                data = recvall(self._client_sock, packet_bytes)
+                if data is None:
+                    self.on_log("[live] connection closed by amplifier")
                     break
+                unpacked = struct.unpack(f'>{len(data) // 2}h', data)
+                block    = np.array(unpacked).reshape((-1, self.n_channels)).T
+                emg      = block[:self.emg_channels, :].astype(float)
+                for i in range(emg.shape[1]):
+                    yield emg[:, i]
+            except Exception as e:
+                self.on_log(f"[live] recv error: {e}")
+                break
 
-                if self.bytes_per_sample == 2:
-                    # Big-endian int16
-                    chunk = np.frombuffer(raw_bytes, dtype='>i2').reshape(
-                        samples_per_chunk, self.n_total_channels
-                    )
-                else:
-                    # 24-bit: manual conversion (3 bytes per sample)
-                    n_values = samples_per_chunk * self.n_total_channels
-                    raw = np.frombuffer(raw_bytes, dtype=np.uint8).reshape(n_values, 3)
-                    chunk = (raw[:, 0].astype(np.int32) * 65536
-                             + raw[:, 1].astype(np.int32) * 256
-                             + raw[:, 2].astype(np.int32))
-                    chunk[chunk >= 8388608] -= 16777216
-                    chunk = chunk.reshape(samples_per_chunk, self.n_total_channels)
+    def stop(self):
+        self._stop = True
+        # Close server socket first to unblock any pending accept()
+        try:
+            if self._server_sock:
+                self._server_sock.close()
+        except Exception:
+            pass
+        try:
+            if self._client_sock:
+                self._client_sock.close()
+        except Exception:
+            pass
+        self._server_sock = None
+        self._client_sock = None
 
-                # Yield one sample at a time, first emg_channels only, in mV
-                for row_idx in range(samples_per_chunk):
-                    if self._stop:
-                        break
+    def pause(self):
+        pass
 
-                    # Block while paused — discard live data so buffer doesn't overflow
-                    while self._paused and not self._stop:
-                        time.sleep(0.05)
-                    if self._stop:
-                        break
-
-                    sample = chunk[row_idx, :self.n_channels].astype(np.float64) * CONVERSION_FACTOR
-
-                    # Collect rest calibration
-                    if sample_idx < cal_n:
-                        self._rest_samples.append(sample)
-                        if sample_idx == cal_n - 1:
-                            self._rest_data = np.array(self._rest_samples)
-                            self._on_log(
-                                f"Rest calibration complete "
-                                f"({self.calibration_s}s, {cal_n} samples)"
-                            )
-
-                    sample_idx += 1
-                    yield sample
-
-        except (ConnectionError, OSError) as e:
-            if not self._stop:
-                self._on_log(f"Connection lost: {e}")
-        finally:
-            self.stop()
-
-    @property
-    def rest_data(self):
-        """Return rest calibration data collected during the first seconds."""
-        if self._rest_data is not None:
-            return self._rest_data
-        if self._rest_samples:
-            return np.array(self._rest_samples)
-        return None
+    def resume(self):
+        pass

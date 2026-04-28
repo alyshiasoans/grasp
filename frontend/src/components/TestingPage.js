@@ -1,52 +1,35 @@
 /**
  * TestingPage.jsx — EMG Rehabilitation Platform
  *
- * REST-NORMALIZED THRESHOLD SYSTEM
+ * ABSOLUTE THRESHOLD SYSTEM
  * ─────────────────────────────────────────────────────────────────────────────
- * 1. T_ON / T_OFF are rest-normalized RMS ratios.
- *    Rest should sit near 1.0, and gestures should rise above that.
+ * 1. T_ON_ABS / T_OFF_ABS are raw ADC RMS values (no calibration needed).
+ *    They are broadcast by the backend on every `signal` event so the EMG
+ *    strip always draws threshold lines at the correct position.
  *
- * 2. `act` in every `state` event is the normalized median RMS, so
- *    the activation bar and ball just use it directly.
+ * 2. `act` in every `state` event is the absolute median RMS.
  *
- * 3. The `state` event now carries a `votes` array (list of gesture name
- *    strings) which is forwarded to the classification handler so the
- *    VotesPie shows real data instead of nothing.
+ * 3. The `state` event carries a `votes` array forwarded to VotesPie.
  *
- * 4. No calibration wait — backend emits REST immediately on connect.
- *
- * 5. EMG strip y-axis is scaled to T_ON * 2.5 so the threshold lines
- *    always sit at a sensible position on screen regardless of participant.
+ * 4. EMG strip y-axis is scaled to T_ON * 2.5 so threshold lines are visible.
  */
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import {
+  API, CHANNEL_COUNT, GOOD_THRESHOLD, FAIR_THRESHOLD,
+  T_ON_DEFAULT, T_OFF_DEFAULT, GESTURE_COLORS, GESTURE_IMAGES_PNG,
+  SUCCESS_GREEN,
+} from '../constants';
+import SensorStatusBar from './SensorStatusBar';
+import EMGStrip from './EMGStrip';
 
 // ─────────────────────────────────────────────────────────────────────────────
-const API            = 'http://localhost:5050';
 const MAX_RETRIES    = 3;
-const CHANNEL_COUNT  = 64;
-const GOOD_THRESHOLD = 50;
-const FAIR_THRESHOLD = 30;
-const SUCCESS_GREEN  = '#35d06e';
 const GAME_VIEW_MAX  = 1120;
 
-// Normalized RMS threshold defaults — overridden live from backend signal events
-const T_ON_DEFAULT  = 2.0;
-const T_OFF_DEFAULT = 1.3;
-
-const GESTURE_COLORS = {
-  'Open':'#00e5ff',  'Close':'#ff4081',   'Thumbs Up':'#69ff47',
-  'Peace':'#ffd740', 'Index Point':'#e040fb', 'Four':'#ff6d00',
-  'Okay':'#00e676',  'Spiderman':'#ff1744',
-};
 const ALL_GESTURES = Object.keys(GESTURE_COLORS);
 
-const GESTURE_IMAGES = {
-  'Open':'/gestures/open.jpg',            'Close':'/gestures/close.jpg',
-  'Thumbs Up':'/gestures/thumbs_up.jpg',  'Peace':'/gestures/peace.jpg',
-  'Index Point':'/gestures/index_point.jpg', 'Four':'/gestures/four.jpg',
-  'Okay':'/gestures/okay.jpg',            'Spiderman':'/gestures/spiderman.jpg',
-};
+const GESTURE_IMAGES = GESTURE_IMAGES_PNG;
 
 const SIM_GESTURE_ORDER = [
   'Okay','Open','Peace','Peace','Thumbs Up','Spiderman','Spiderman','Thumbs Up',
@@ -82,81 +65,6 @@ function missYForPipe(pipe) {
   const roomAbove = pipe.gapTop - (MARGIN + BR);
   const roomBelow = (GH - MARGIN - BR) - (pipe.gapTop + GAP_H);
   return roomBelow >= roomAbove ? belowY : aboveY;
-}
-
-// ── Sensor status ─────────────────────────────────────────────────────────────
-function SensorStatusBar({ channels }) {
-  const activeCount = useMemo(() => channels.filter(v => v > 0.15).length, [channels]);
-  const quality = activeCount >= GOOD_THRESHOLD ? 'good'
-    : activeCount >= FAIR_THRESHOLD ? 'fair' : 'poor';
-  const col   = { good:SUCCESS_GREEN, fair:'#ffd740', poor:'#ff4081' }[quality];
-  const label = { good:'Good',    fair:'Fair',    poor:'Poor'    }[quality];
-  return (
-    <div style={{ display:'flex', alignItems:'center', gap:6,
-      fontSize:'0.78rem', fontFamily:'monospace', color:'#666' }}>
-      <span>Sensor quality:</span>
-      <span style={{ color:col, fontWeight:700 }}>{label}</span>
-    </div>
-  );
-}
-
-// ── EMG activation strip ──────────────────────────────────────────────────────
-// actHistory: array of absolute RMS values
-// tOn / tOff: absolute RMS thresholds from backend
-function EMGStrip({ actHistory, tOn, tOff }) {
-  const ref = useRef(null);
-  const tOnVal  = tOn  || T_ON_DEFAULT;
-  const tOffVal = tOff || T_OFF_DEFAULT;
-
-  useEffect(() => {
-    const c = ref.current; if (!c) return;
-    const ctx = c.getContext('2d');
-    const W = c.width, H = c.height;
-    ctx.fillStyle = '#090910'; ctx.fillRect(0, 0, W, H);
-
-    // Scale: show 0 → T_ON * 2.5 so both threshold lines are comfortably visible
-    const maxAct = tOnVal * 2.5;
-    const yOn  = H - (tOnVal  / maxAct) * H;
-    const yOff = H - (tOffVal / maxAct) * H;
-
-    ctx.setLineDash([4, 4]); ctx.lineWidth = 1;
-    ctx.strokeStyle = '#ff408133';
-    ctx.beginPath(); ctx.moveTo(0, yOn);  ctx.lineTo(W, yOn);  ctx.stroke();
-    ctx.strokeStyle = '#ffd74033';
-    ctx.beginPath(); ctx.moveTo(0, yOff); ctx.lineTo(W, yOff); ctx.stroke();
-    ctx.setLineDash([]);
-
-    ctx.font = '9px monospace';
-    ctx.fillStyle = '#ff408177';
-    ctx.fillText(`T_ON ${tOnVal}`,  5, yOn  - 2);
-    ctx.fillStyle = '#ffd74077';
-    ctx.fillText(`T_OFF ${tOffVal}`, 5, yOff - 2);
-
-    if (actHistory.length < 2) return;
-    ctx.beginPath(); ctx.lineWidth = 2;
-    actHistory.forEach((v, i) => {
-      const x = (i / (actHistory.length - 1)) * W;
-      const y = H - Math.min(1, v / maxAct) * H;
-      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
-    });
-    const gr = ctx.createLinearGradient(0, 0, W, 0);
-    gr.addColorStop(0, '#5c5cff44'); gr.addColorStop(1, '#00e5ff');
-    ctx.strokeStyle = gr; ctx.stroke();
-    ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath();
-    const fg = ctx.createLinearGradient(0, 0, 0, H);
-    fg.addColorStop(0, '#00e5ff14'); fg.addColorStop(1, '#00e5ff00');
-    ctx.fillStyle = fg; ctx.fill();
-  }, [actHistory, tOnVal, tOffVal]);
-
-  return (
-    <div>
-      <div style={{ fontSize:'0.68rem', color:'#555', fontFamily:'monospace',
-        marginBottom:3, letterSpacing:1 }}>EMG ACTIVATION</div>
-      <canvas ref={ref} width={700} height={80}
-        style={{ width:'100%', height:80, borderRadius:6,
-          border:'1px solid #1a1a2e', display:'block' }} />
-    </div>
-  );
 }
 
 // ── Pipe draw helper ──────────────────────────────────────────────────────────
@@ -309,7 +217,6 @@ function drawPipeWoodEnhanced(ctx, x, y, w, h) {
 const GAME_THEMES = {
     default: {
     name: 'Default',
-    emoji: '🎮',
     border: '#1e1e35',
 
     drawBg(ctx) {
@@ -404,7 +311,7 @@ const GAME_THEMES = {
     flashFail: 'rgba(255,64,129,',
   },
   outdoor: {
-    name: 'Outdoor', emoji: '🌿',
+    name: 'Outdoor',
     border: '#8aaa7a',
     drawBg(ctx, g) {
       const sky = ctx.createLinearGradient(0, 0, 0, GH);
@@ -460,7 +367,7 @@ const GAME_THEMES = {
   },
 
   space: {
-    name: 'Space', emoji: '🚀',
+    name: 'Space',
     border: '#2a2a55',
     drawBg(ctx, g) {
       ctx.fillStyle = '#0a0a1a'; ctx.fillRect(0, 0, GW, GH);
@@ -522,7 +429,7 @@ const GAME_THEMES = {
   },
 
   underwater: {
-    name: 'Underwater', emoji: '🐠',
+    name: 'Underwater',
     border: '#2a6a7a',
     drawBg(ctx, g) {
       const water = ctx.createLinearGradient(0, 0, 0, GH);
@@ -599,7 +506,7 @@ const GAME_THEMES = {
   },
 
   sunset: {
-    name: 'Sunset', emoji: '🌅',
+    name: 'Sunset',
     border: '#8a5a4a',
     drawBg(ctx, g) {
       const grad = ctx.createLinearGradient(0, 0, 0, GH);
@@ -675,7 +582,7 @@ const GAME_THEMES = {
   },
 
   winter: {
-    name: 'Winter', emoji: '❄️',
+    name: 'Winter',
     border: '#8aaccc',
     drawBg(ctx, g) {
       const grad = ctx.createLinearGradient(0, 0, 0, GH);
@@ -842,6 +749,11 @@ function FlappyBallGame({
 
   useEffect(() => {
     G.current.pipes.forEach(p => {
+      if (!p.evaluated && p.outcome) {
+        // Clear stale outcomes from classifications that arrived during overlay
+        p.outcome = null; p.predicted = null;
+        p.votes = null; p.decisionToken = null;
+      }
       if (!p.outcome) {
         p.label = targetGesture || '?';
         p.color = gestureColor || '#5c5cff';
@@ -850,10 +762,19 @@ function FlappyBallGame({
   }, [targetGesture, gestureColor]);
 
   useEffect(() => {
-    if (!decision || !decision.token) return;
+    if (!decision || !decision.token) {
+      // Decision cleared (retry / advance) — purge stale outcomes on unevaluated pipes
+      G.current.pipes.forEach(p => {
+        if (!p.evaluated && p.outcome) {
+          p.outcome = null; p.predicted = null;
+          p.votes = null; p.decisionToken = null;
+        }
+      });
+      return;
+    }
     if (lastDecisionTokenRef.current === decision.token) return;
     lastDecisionTokenRef.current = decision.token;
-    const pipe = G.current.pipes.find(p => !p.evaluated && !p.outcome);
+    const pipe = G.current.pipes.find(p => !p.evaluated);
     if (!pipe) return;
     pipe.outcome       = decision.isCorrect ? 'pass' : 'fail';
     pipe.predicted     = decision.predicted || null;
@@ -1125,6 +1046,8 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
   const gameShellRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
+  const phaseRef = useRef(phase);
+  useEffect(() => { phaseRef.current  = phase;          }, [phase]);
   useEffect(() => { curRef.current    = currentGesture; }, [currentGesture]);
   useEffect(() => { poolRef.current   = gesturePool;    }, [gesturePool]);
   useEffect(() => { simIdxRef.current = simIdx;         }, [simIdx]);
@@ -1253,13 +1176,9 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
 
   const handleClassification = useCallback((predicted, voteList) => {
     const gesture = curRef.current;
-    if (!gesture || pendingResultRef.current || phaseRef.current === 'result') return;
-    if (advancedSimulationControls && mode === 'simulated' && backendDrivenSession && promptStartRef.current != null) {
-      const latency = performance.now() - promptStartRef.current;
-      const roundedLatency = Math.round(latency);
-      setLastLatencyMs(roundedLatency);
-      console.log(`[admin simulation] latency: ${roundedLatency} ms`);
-    }
+    if (!gesture) return;
+    // Only accept classifications while actively prompting
+    if (phaseRef.current !== 'prompting') return;
     decisionSeqRef.current += 1;
     setPendingResult({
       token: decisionSeqRef.current,
@@ -1397,6 +1316,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
     let timer    = 0;
     let act      = 0;
     let fired    = false;
+    let refired  = false;
 
     const iv = setInterval(() => {
       if (!simRunning.current) return;
@@ -1408,6 +1328,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
         timer = 0;
         act = 0;
         fired = false;
+        refired = false;
       }
 
       timer++;
@@ -1439,6 +1360,23 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
 
       } else if (simPhase === 'hold') {
         act = Math.max(SIM_T_ON * 3.2, Math.min(SIM_T_ON * 3.9, act + noise() * 0.25));
+        // Re-classify mid-hold with higher accuracy (simulates EMG refinement)
+        if (!refired && timer >= Math.round(TICKS_HOLD * 0.4)) {
+          refired = true;
+          const idx       = simIdxRef.current;
+          const target    = SIM_GESTURE_ORDER[idx];
+          const correct   = Math.random() < 0.88;
+          const predicted = correct
+            ? target
+            : ALL_GESTURES[Math.floor(Math.random() * ALL_GESTURES.length)];
+          const fv = Array.from({ length:30 }, () =>
+            Math.random() < 0.82
+              ? predicted
+              : ALL_GESTURES[Math.floor(Math.random() * ALL_GESTURES.length)]
+          );
+          setVotes(fv);
+          classifyRef.current(predicted, fv);
+        }
         if (timer > TICKS_HOLD) { simPhase = 'falling'; timer = 0; }
 
       } else {
@@ -1496,12 +1434,16 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
         return n.length > 120 ? n.slice(-120) : n;
       });
 
-      // Detect ACTIVE → REST transition with a real gesture name.
-      // This is the single authoritative classification trigger for live mode.
+      // Classify as soon as prediction is available (during ACTIVE),
+      // not just on ACTIVE→REST — so the ball moves early.
       const gesture  = data.gesture || '';
       const voteList = Array.isArray(data.votes) ? data.votes : [];
       const isReal   = gesture && gesture !== 'REST' && gesture !== '—' && gesture !== '';
 
+      if (label === 'ACTIVE' && isReal) {
+        classifyRef.current(gesture, voteList);
+      }
+      // Fallback: also trigger on ACTIVE→REST in case the early one was missed
       if (lastLabel === 'ACTIVE' && label === 'REST' && isReal) {
         classifyRef.current(gesture, voteList);
       }
@@ -1613,21 +1555,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
         }
       }, 1000);
 
-      if (socket && mode === 'live') {
-        socket.emit('start', { mode, liveOpts, userId: user?.id });
-      } else if (socket && advancedSimulationControls && selectedTestFileId) {
-        socket.emit('start', {
-          mode,
-          liveOpts,
-          userId: user?.id,
-          modelId: selectedModelId ? Number(selectedModelId) : null,
-          testFileId: selectedTestFileId ? Number(selectedTestFileId) : null,
-          thresholds: {
-            tOn: Number(thresholds.tOn) || T_ON_DEFAULT,
-            tOff: Number(thresholds.tOff) || T_OFF_DEFAULT,
-          },
-        });
-      }
+      if (socket && mode === 'live') socket.emit('start', { mode:'live', liveOpts, userId: user?.id }); //CHANGE???
     } catch (e) {
       console.error('Failed to start testing session:', e);
     }
@@ -1680,7 +1608,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
   if (phase === 'setup') return (
     <div className="testing-page" style={{ maxWidth:920, margin:'0 auto', padding:'0 0 40px' }}>
       <div className="card test-setup-card">
-        <h3 className="dashboard-card-title">Test Session Setup</h3>
+        <h3 className="dashboard-card-title">Practice Session Setup</h3>
         <div className="train-setup-grid">
 
           <div className="train-setup-section" style={{ gridColumn:'1 / -1' }}>
@@ -1847,7 +1775,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
                   className={`btn btn-mode ${gameTheme===key?'active':''}`}
                   onClick={() => setGameTheme(key)}
                   style={{ display:'flex', alignItems:'center', gap:5, fontSize:'0.78rem' }}>
-                  <span>{t.emoji}</span> {t.name}
+                  {t.name}
                 </button>
               ))}
             </div>
@@ -1883,7 +1811,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
           letterSpacing:3, marginBottom:24 }}>GAME STARTING IN</div>
         <div style={{
           fontSize:'6rem', fontWeight:900, fontFamily:'monospace',
-          color:'#00e5ff', textShadow:'0 0 40px #00e5ff66, 0 0 80px #00e5ff22',
+          color:'#5b6abf', textShadow:'0 0 40px #5b6abf66, 0 0 80px #5b6abf22',
           animation:'pulse 1s ease-in-out infinite',
           lineHeight:1,
         }}>{countdown}</div>
@@ -1964,16 +1892,11 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
               #{simIdx + 1}/{simGestureOrder.length}
             </span>
           )}
-          {advancedSimulationControls && mode === 'live' && (
+          {/* {mode === 'live' && (
             <span style={{ color:'#555', fontSize:'0.7rem', fontFamily:'monospace' }}>
               T_ON={tOnLive} T_OFF={tOffLive}
             </span>
-          )}
-          {advancedSimulationControls && mode === 'simulated' && backendDrivenSession && lastLatencyMs != null && (
-            <span style={{ color:'#555', fontSize:'0.7rem', fontFamily:'monospace' }}>
-              latency {lastLatencyMs} ms
-            </span>
-          )}
+          )} */}
         </div>
         <SensorStatusBar channels={channels} />
         <div style={{ display:'flex', gap:8, alignItems:'center', flexShrink:0 }}>
@@ -1991,7 +1914,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
           {GESTURE_IMAGES[currentGesture.name] && (
             <img src={GESTURE_IMAGES[currentGesture.name]} alt={currentGesture.name}
               style={{ width:70, height:70, objectFit:'cover', borderRadius:10,
-                border:`2px solid ${gColor}55`, flexShrink:0 }} />
+                border:'none', flexShrink:0 }} />
           )}
           <div style={{ minWidth:0 }}>
             <div style={{ fontSize:'0.72rem', color:'#888', fontFamily:'monospace', letterSpacing:1.2 }}>
@@ -2023,7 +1946,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
                 {GESTURE_IMAGES[pendingResult.predicted] && (
                   <img src={GESTURE_IMAGES[pendingResult.predicted]} alt={pendingResult.predicted}
                     style={{ width:36, height:36, objectFit:'cover', borderRadius:6,
-                      border:`2px solid ${predGestureCol}66` }} />
+                      border:'none' }} />
                 )}
                 <div>
                   <div style={{ fontSize:'0.6rem', color:'#666', fontFamily:'monospace', letterSpacing:1 }}>
@@ -2154,7 +2077,7 @@ export default function TestingPage({ socket, connected, user, onSessionEnd, onR
 
         {/* EMG strip — passes live absolute thresholds */}
         <div style={{ marginTop:12, width:'100%', maxWidth:GAME_VIEW_MAX, marginInline:'auto' }}>
-          <EMGStrip actHistory={actHistory} tOn={tOnLive} tOff={tOffLive} />
+          <EMGStrip actHistory={actHistory} />
         </div>
       </div>
 

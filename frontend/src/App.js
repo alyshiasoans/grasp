@@ -7,8 +7,10 @@ import Dashboard from './components/Dashboard';
 import AdminDashboard from './components/AdminDashboard';
 import LoginPage from './components/LoginPage';
 import ProgressPage from './components/ProgressPage';
+import LivePredictionPage from './components/LivePredictionPage';
+import SettingsPage from './components/SettingsPage';
 
-const BACKEND_URL = 'http://localhost:5050';
+import { API as BACKEND_URL } from './constants';
 
 function App() {
   const [user, setUser] = useState(null);
@@ -113,7 +115,11 @@ function App() {
 
       <div className="app-main">
         <header className="header">
-          <h1 className="title">{headerTitle}</h1>
+          <h1 className="title">
+            {user?.isAdmin
+              ? 'Admin Dashboard'
+              : activePage === 'training' ? 'Gesture Training' : activePage === 'testing' ? 'Gesture Practice' : activePage === 'predict' ? 'Live Prediction' : activePage === 'progress' ? 'Progress' : activePage === 'settings' ? 'Settings' : 'Dashboard'}
+          </h1>
           {!user?.isAdmin && (
             <div className="header-right">
               <div className="header-mode-toggle">
@@ -158,8 +164,30 @@ function App() {
               <TestingPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} />
             </div>
 
+            <div style={{ display: activePage === 'predict' ? 'block' : 'none' }}>
+              <LivePredictionPage socket={socketRef.current} connected={connected} user={user} mode={mode} liveOpts={liveOpts} activePage={activePage} />
+            </div>
+
             <div style={{ display: activePage === 'progress' ? 'block' : 'none' }}>
               <ProgressPage user={user} isActive={activePage === 'progress'} />
+            </div>
+
+            <div style={{ display: activePage === 'settings' ? 'block' : 'none' }}>
+              <SettingsPage
+                user={user}
+                setUser={setUser}
+                connected={connected}
+                activePage={activePage}
+              />
+            </div>
+
+            <div style={{ display: activePage === 'settings' ? 'block' : 'none' }}>
+              <SettingsPage
+                user={user}
+                setUser={setUser}
+                connected={connected}
+                activePage={activePage}
+              />
             </div>
 
             {activePage !== 'progress' && (
